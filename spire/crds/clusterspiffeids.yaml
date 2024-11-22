@@ -1,0 +1,135 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.8.0
+  name: clusterspiffeids.spire.spiffe.io
+spec:
+  group: spire.spiffe.io
+  names:
+    kind: ClusterSPIFFEID
+    listKind: ClusterSPIFFEIDList
+    plural: clusterspiffeids
+    singular: clusterspiffeid
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: ClusterSPIFFEID is the Schema for the clusterspiffeids API
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: ClusterSPIFFEIDSpec defines the desired state
+              properties:
+                admin:
+                  description: Admin indicates whether or not the SVID can be used to access the SPIRE APIs
+                  type: boolean
+                dnsNameTemplates:
+                  description: DNSNameTemplate represents templates for extra DNS names
+                  items:
+                    type: string
+                  type: array
+                downstream:
+                  description: Downstream indicates that the entry describes a downstream SPIRE server
+                  type: boolean
+                federatesWith:
+                  description: FederatesWith is a list of trust domain names
+                  items:
+                    type: string
+                  type: array
+                namespaceSelector:
+                  description: NamespaceSelector selects the namespaces
+                  properties:
+                    matchExpressions:
+                      items:
+                        description: A label selector requirement
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                          values:
+                            items:
+                              type: string
+                            type: array
+                        required:
+                          - key
+                          - operator
+                        type: object
+                      type: array
+                    matchLabels:
+                      additionalProperties:
+                        type: string
+                      type: object
+                  type: object
+                podSelector:
+                  description: PodSelector selects the pods
+                  properties:
+                    matchExpressions:
+                      items:
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                          values:
+                            items:
+                              type: string
+                            type: array
+                        required:
+                          - key
+                          - operator
+                        type: object
+                      type: array
+                    matchLabels:
+                      additionalProperties:
+                        type: string
+                      type: object
+                  type: object
+                spiffeIDTemplate:
+                  description: SPIFFEID is the SPIFFE ID template
+                  type: string
+                ttl:
+                  description: TTL indicates an upper-bound time-to-live
+                  type: string
+                workloadSelectorTemplates:
+                  description: WorkloadSelectorTemplates are templates for selectors
+                  items:
+                    type: string
+                  type: array
+              required:
+                - spiffeIDTemplate
+              type: object
+            status:
+              description: ClusterSPIFFEIDStatus defines the observed state
+              properties:
+                stats:
+                  description: Stats produced by the last entry reconciliation
+                  properties:
+                    entriesMasked:
+                      type: integer
+                    entriesToSet:
+                      type: integer
+                    entryFailures:
+                      type: integer
+                    namespacesIgnored:
+                      type: integer
+                    namespacesSelected:
+                      type: integer
+                    podEntryRenderFailures:
+                      type: integer
+                    podsSelected:
+                      type: integer
+                  type: object
+              type: object
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: { }

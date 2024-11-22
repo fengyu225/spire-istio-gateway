@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: svid-secret-sync
+  namespace: "istio-system"
+spec:
+  serviceName: svid-secret-sync
+  replicas: 1
+  selector:
+    matchLabels:
+      app: svid-secret-sync
+  template:
+    metadata:
+      labels:
+        app: svid-secret-sync
+        spiffe.io/spire-managed-identity: "true"  # Enable SPIRE identity
+    spec:
+      serviceAccountName: svid-secret-sync  # Use the Service Account
+      containers:
+        - name: controller
+          image: fengyu225/svid-secret-sync:v0.1.8
+          volumeMounts:
+            - name: spire-agent-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+      volumes:
+        - name: spire-agent-socket
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: svid-secret-sync
+  namespace: spire

@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - csi-driver.yaml
+  - crds/clusterfederatedtrustdomains.yaml
+  - crds/clusterspiffeids.yaml
+  - configmaps/controller-manager.yaml
+  - configmaps/spire-agent.yaml
+  - configmaps/spire-bundle.yaml
+  - configmaps/spire-server.yaml
+  - deployments/spire-agent.yaml
+  - deployments/spire-server.yaml
+  - services/spire-server.yaml
+  - webhooks/validating-webhook.yaml
+  - rbac/serviceaccounts.yaml
+  - rbac/clusterroles.yaml
+  - rbac/clusterrolebindings.yaml
+  - rbac/roles.yaml
+  - rbac/rolebindings.yaml

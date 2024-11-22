@@ -1,0 +1,33 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: default
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  podSelector:
+    matchLabels:
+      spiffe.io/spire-managed-identity: "true"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: ingress-app1
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/app1"
+  workloadSelectorTemplates:
+    - k8s:ns:istio-system
+    - k8s:sa:svid-secret-sync
+  dnsNameTemplates:
+    - app1.example.org
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: ingress-app2
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/app2"
+  workloadSelectorTemplates:
+    - k8s:ns:istio-system
+    - k8s:sa:svid-secret-sync
+  dnsNameTemplates:
+    - app2.example.org

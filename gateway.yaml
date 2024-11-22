@@ -1,0 +1,59 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: apps-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 443
+        name: https-app1
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE
+        credentialName: app1-credential
+      hosts:
+        - "app1.example.org"
+    - port:
+        number: 443
+        name: https-app2
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE
+        credentialName: app2-credential
+      hosts:
+        - "app2.example.org"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: app1
+spec:
+  hosts:
+    - "app1.example.org"
+  gateways:
+    - istio-system/apps-gateway
+  http:
+    - route:
+        - destination:
+            host: app1
+            port:
+              number: 80
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: app2
+spec:
+  hosts:
+    - "app2.example.org"
+  gateways:
+    - istio-system/apps-gateway
+  http:
+    - route:
+        - destination:
+            host: app2
+            port:
+              number: 80

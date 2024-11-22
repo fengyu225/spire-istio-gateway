@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-server
+  namespace: spire
+data:
+  server.conf: |
+    server {
+      bind_address = "0.0.0.0"
+      bind_port = "8081"
+      trust_domain = "example.org"
+      data_dir = "/run/spire/server/data"
+      log_level = "DEBUG"
+      default_x509_svid_ttl = "24h"
+      ca_ttl = "168h"
+      ca_subject = {
+        country = ["US"]
+        organization = ["Example Organization"]
+        common_name = "example.org"
+      }
+      ca_key_type = "rsa-2048"
+      federation {
+        bundle_endpoint {
+          address = "0.0.0.0"
+          port = 8443
+        }
+      }
+    }
+
+    plugins {
+      DataStore "sql" {
+        plugin_data {
+          database_type = "postgres"
+          connection_string = "postgresql://spire_admin:LiGJ6wuDZhPsQBLB@spire-db-1.cbs088qgupl4.us-east-1.rds.amazonaws.com:5432/spiredb?sslmode=require"
+        }
+      }    
+
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          clusters = {
+            "spire-demo" = {
+              service_account_allow_list = ["spire:spire-agent"]
+            }
+          }
+        }
+      }
+
+      KeyManager "disk" {
+        plugin_data {
+          keys_path = "/run/spire/server/data/keys.json"
+        }    
+      }
+    
+      UpstreamAuthority "aws_pca" {
+        plugin_data {
+          region = "us-east-1"
+          certificate_authority_arn = "arn:aws:acm-pca:us-east-1:164314285563:certificate-authority/4cc5758d-ac26-41dd-b3c8-165cb2ffc80f"
+          signing_algorithm = "SHA256WITHRSA"
+          x509_ca_ttl = "48h"
+        }
+      }    
+    
+      Notifier "k8sbundle" {
+        plugin_data {
+          namespace = "spire"
+        }
+      }
+    }
+
+    health_checks {
+      listener_enabled = true
+      bind_address = "0.0.0.0"
+      bind_port = "8080"
+      live_path = "/live"
+      ready_path = "/ready"
+    }

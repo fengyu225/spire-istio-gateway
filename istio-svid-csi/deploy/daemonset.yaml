@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ingress-svid-csi-driver
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      app: ingress-svid-csi-driver
+  template:
+    metadata:
+      labels:
+        app: ingress-svid-csi-driver
+    spec:
+      serviceAccount: ingress-svid-csi-driver
+      hostNetwork: true
+      containers:
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.5.0
+          args:
+            - --v=5
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/ingress.csi.spiffe.io/csi.sock
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: csi-driver
+          image: fengyu225/istio-svid-csi:0.1.0
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: /run/secrets/workload-spiffe-uds/socket
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: workload-socket
+              mountPath: /run/secrets/workload-spiffe-uds
+              readOnly: true
+            - name: mountpoint-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+            - name: fuse
+              mountPath: /dev/fuse
+      volumes:
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/ingress.csi.spiffe.io
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: DirectoryOrCreate
+        - name: workload-socket
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true
+        - name: mountpoint-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: fuse
+          hostPath:
+            path: /dev/fuse

@@ -40,7 +40,7 @@ spec:
   spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/app1"
   workloadSelectorTemplates:
     - k8s:ns:istio-system
-    - k8s:sa:istio-ingressgateway-service-account
+    - k8s:sa:ingress-svid-csi-driver
   dnsNameTemplates:
     - app1.example.org
 ---
@@ -52,6 +52,6 @@ spec:
   spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/app2"
   workloadSelectorTemplates:
     - k8s:ns:istio-system
-    - k8s:sa:istio-ingressgateway-service-account
+    - k8s:sa:ingress-svid-csi-driver
   dnsNameTemplates:
     - app2.example.org

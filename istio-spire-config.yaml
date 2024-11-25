@@ -47,6 +47,7 @@ spec:
               kind: Deployment
               name: istio-ingressgateway
               patches:
+                # Original SPIFFE volume and mount
                 - path: spec.template.spec.volumes.[name:workload-socket]
                   value:
                     name: workload-socket
@@ -58,6 +59,19 @@ spec:
                     name: workload-socket
                     mountPath: "/run/secrets/workload-spiffe-uds"
                     readOnly: true
+                # Add new volume for ingressgateway-certs
+                - path: spec.template.spec.volumes.[name:ingressgateway-certs]
+                  value:
+                    name: ingressgateway-certs
+                    csi:
+                      driver: "ingress.csi.spiffe.io"
+                      readOnly: true
+                # Add new volumeMount for ingressgateway-certs
+                - path: spec.template.spec.containers.[name:istio-proxy].volumeMounts.[name:ingressgateway-certs]
+                  value:
+                    name: ingressgateway-certs
+                    mountPath: "/etc/istio/ingressgateway-certs"
+                    readOnly: true
                 - path: spec.template.spec.initContainers
                   value:
                     - name: wait-for-spire-socket
@@ -65,6 +79,9 @@ spec:
                       volumeMounts:
                         - name: workload-socket
                           mountPath: /run/secrets/workload-spiffe-uds
+                          readOnly: true
+                        - name: ingressgateway-certs
+                          mountPath: /etc/istio/ingressgateway-certs
                           readOnly: true
                       env:
                         - name: CHECK_FILE

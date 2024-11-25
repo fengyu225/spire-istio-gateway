@@ -31,7 +31,7 @@ data:
       DataStore "sql" {
         plugin_data {
           database_type = "postgres"
-          connection_string = "postgresql://spire_admin:LiGJ6wuDZhPsQBLB@spire-db-1.cbs088qgupl4.us-east-1.rds.amazonaws.com:5432/spiredb?sslmode=require"
+          connection_string = "postgresql://spire_admin:AVNS_5ZG_b_MaTCmqlZBDld_@db-postgresql-sfo2-16385-do-user-10570456-0.i.db.ondigitalocean.com:25060/spiredb?sslmode=require"
         }
       }    
 
@@ -45,12 +45,13 @@ data:
         }
       }
 
-      KeyManager "disk" {
+      KeyManager "aws_kms" {
         plugin_data {
-          keys_path = "/run/spire/server/data/keys.json"
-        }    
+          region = "us-east-1"
+          key_identifier_value = "11b28e61-de6a-4f32-860e-1eb975533c1d"
+        }
       }
-    
+   
       UpstreamAuthority "aws_pca" {
         plugin_data {
           region = "us-east-1"

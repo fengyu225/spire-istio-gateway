@@ -31,3 +31,27 @@ spec:
     - k8s:sa:svid-secret-sync
   dnsNameTemplates:
     - app2.example.org
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: ingressgw-app1
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/app1"
+  workloadSelectorTemplates:
+    - k8s:ns:istio-system
+    - k8s:sa:istio-ingressgateway-service-account
+  dnsNameTemplates:
+    - app1.example.org
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: ingressgw-app2
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/app2"
+  workloadSelectorTemplates:
+    - k8s:ns:istio-system
+    - k8s:sa:istio-ingressgateway-service-account
+  dnsNameTemplates:
+    - app2.example.org

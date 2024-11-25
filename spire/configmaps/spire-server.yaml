@@ -31,7 +31,7 @@ data:
       DataStore "sql" {
         plugin_data {
           database_type = "postgres"
-          connection_string = "postgresql://spire_admin:AVNS_5ZG_b_MaTCmqlZBDld_@db-postgresql-sfo2-16385-do-user-10570456-0.i.db.ondigitalocean.com:25060/spiredb?sslmode=require"
+          connection_string = "postgresql://spire_admin:not-a-secret@db-postgresql-sfo2-16385-do-user-10570456-0.i.db.ondigitalocean.com:25060/spiredb?sslmode=require"
         }
       }    
 
@@ -48,7 +48,7 @@ data:
       KeyManager "aws_kms" {
         plugin_data {
           region = "us-east-1"
-          key_identifier_value = "11b28e61-de6a-4f32-860e-1eb975533c1d"
+          key_identifier_value = "46f0a119-d701-4a68-b860-14a672bb5c80"
         }
       }
    

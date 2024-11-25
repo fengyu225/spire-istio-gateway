@@ -10,7 +10,7 @@ data:
       log_level = "DEBUG"
       server_address = "spire-server"
       server_port = "8081"
-      socket_path = "/run/secrets/workload-spiffe-uds/socket"
+      socket_path = "/run/secrets/credential-uds/socket"
       trust_bundle_path = "/run/spire/bundle/bundle.crt"
       trust_domain = "example.org"
     }

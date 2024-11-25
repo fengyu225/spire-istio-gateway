@@ -41,12 +41,12 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: SPIFFE_ENDPOINT_SOCKET
-              value: /run/secrets/workload-spiffe-uds/socket
+              value: /run/secrets/credential-uds/socket
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
             - name: workload-socket
-              mountPath: /run/secrets/workload-spiffe-uds
+              mountPath: /run/secrets/credential-uds
               readOnly: true
             - name: mountpoint-dir
               mountPath: /var/lib/kubelet/pods

@@ -15,11 +15,11 @@ spec:
             containers:
             - name: istio-proxy
               volumeMounts:
-              - name: workload-socket
-                mountPath: /run/secrets/workload-spiffe-uds
+              - name: credential-socket
+                mountPath: /run/secrets/credential-uds
                 readOnly: true
             volumes:
-              - name: workload-socket
+              - name: credential-socket
                 csi:
                   driver: "csi.spiffe.io"
                   readOnly: true
@@ -42,57 +42,37 @@ spec:
         label:
           istio: ingressgateway
         k8s:
+          podAnnotations:
+            proxy.istio.io/config: |
+              {
+                "metadata": {
+                  "CREDENTIAL_NAME": "true"
+                }
+              }
           overlays:
             - apiVersion: apps/v1
               kind: Deployment
               name: istio-ingressgateway
               patches:
-                # Original SPIFFE volume and mount
-                - path: spec.template.spec.volumes.[name:workload-socket]
+                - path: spec.template.spec.volumes.[name:credential-socket]
                   value:
-                    name: workload-socket
+                    name: credential-socket
                     csi:
                       driver: "csi.spiffe.io"
                       readOnly: true
-                - path: spec.template.spec.containers.[name:istio-proxy].volumeMounts.[name:workload-socket]
+                - path: spec.template.spec.containers.[name:istio-proxy].volumeMounts.[name:credential-socket]
                   value:
-                    name: workload-socket
-                    mountPath: "/run/secrets/workload-spiffe-uds"
+                    name: credential-socket
+                    mountPath: "/run/secrets/credential-uds"
                     readOnly: true
-                # Add new volume for ingressgateway-certs
                 - path: spec.template.spec.volumes.[name:ingressgateway-certs]
                   value:
                     name: ingressgateway-certs
                     csi:
                       driver: "ingress.csi.spiffe.io"
                       readOnly: true
-                # Add new volumeMount for ingressgateway-certs
                 - path: spec.template.spec.containers.[name:istio-proxy].volumeMounts.[name:ingressgateway-certs]
                   value:
                     name: ingressgateway-certs
                     mountPath: "/etc/istio/ingressgateway-certs"
                     readOnly: true
-                - path: spec.template.spec.initContainers
-                  value:
-                    - name: wait-for-spire-socket
-                      image: busybox:1.28
-                      volumeMounts:
-                        - name: workload-socket
-                          mountPath: /run/secrets/workload-spiffe-uds
-                          readOnly: true
-                        - name: ingressgateway-certs
-                          mountPath: /etc/istio/ingressgateway-certs
-                          readOnly: true
-                      env:
-                        - name: CHECK_FILE
-                          value: /run/secrets/workload-spiffe-uds/socket
-                      command:
-                        - sh
-                        - "-c"
-                        - |-
-                          echo `date -Iseconds` Waiting for: ${CHECK_FILE}
-                          while [[ ! -e ${CHECK_FILE} ]] ; do
-                            echo `date -Iseconds` File does not exist: ${CHECK_FILE}
-                            sleep 15
-                          done
-                          ls -l ${CHECK_FILE}

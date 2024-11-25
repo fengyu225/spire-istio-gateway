@@ -338,6 +338,16 @@ func (d *IngressGatewaySVIDDriver) NodePublishVolume(ctx context.Context, req *c
 		return nil, fmt.Errorf("failed to create mount point directory: %v", err)
 	}
 
+	// Ensure cleanup on error
+	cleanup := func() {
+		if err := syscall.Unmount(req.TargetPath, 0); err != nil {
+			log.Printf("Warning: failed to unmount %s during cleanup: %v", req.TargetPath, err)
+		}
+		if err := os.RemoveAll(req.TargetPath); err != nil {
+			log.Printf("Warning: failed to remove %s during cleanup: %v", req.TargetPath, err)
+		}
+	}
+
 	root := &CustomFSNode{
 		client: client,
 	}
@@ -352,16 +362,19 @@ func (d *IngressGatewaySVIDDriver) NodePublishVolume(ctx context.Context, req *c
 		FirstAutomaticIno: 1,
 	})
 	if err != nil {
+		cleanup()
 		log.Printf("Failed to mount filesystem: %v", err)
 		return nil, fmt.Errorf("failed to mount filesystem: %v", err)
 	}
-	log.Printf("Successfully mounted FUSE filesystem")
 
 	go func() {
 		log.Printf("Starting FUSE server for path: %s", req.TargetPath)
 		server.Serve()
 		log.Printf("FUSE server stopped for path: %s", req.TargetPath)
 	}()
+
+	// Wait a moment to ensure the mount is ready
+	time.Sleep(500 * time.Millisecond)
 
 	log.Printf("NodePublishVolume completed successfully")
 	return &csi.NodePublishVolumeResponse{}, nil

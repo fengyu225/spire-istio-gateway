@@ -2,10 +2,13 @@
 
 ## Architecture
 
-1. SPIRE Server in HA mode using AWS RDS PostgreSQL and KMS for key manager. 
+1. SPIRE Server in HA mode using AWS RDS PostgreSQL and KMS for key manager.
 2. Intermediate CA in AWS Private Certificate Authority (PCA)
-3. Secure gateway using Istio Ingress Gateway with TLS termination using SPIRE-issued certificates 
-4. Custom SVID Secret Sync Controller
+3. Secure gateway using Istio Ingress Gateway with TLS termination using SPIRE-issued certificates
+4. SDS Proxy as CSI Driver interfacing between Istio and SPIRE
+    - Mounts SPIRE Workload API socket to Istio Ingress Gateway pods
+    - Handles certificate updates and distribution
+    - Converts SPIRE SVIDs to Istio-compatible formats
 
 ## Deployment Process
 
@@ -83,7 +86,7 @@ kubectl create secret generic spire-db-credentials \
   --from-literal=password=$DB_PASSWORD
 ```
 
-### 3. AWS PCA Setup 
+### 3. AWS PCA Setup
 
 ```bash
 aws iam create-policy \
@@ -102,6 +105,15 @@ eksctl create iamserviceaccount \
 
 ### 4. SPIRE Deployment
 
+Deploy SDS proxy
+
+```bash
+cd spiffe-csi-driver/deploy/
+kubectl apply -k .
+```
+
+Deploy SPIRE server and agents
+
 ```bash
 cd spire
 kubectl apply -k .
@@ -110,85 +122,76 @@ kubectl apply -k .
 ### 5. Istio Integration
 
 1. Install Istio with SPIFFE integration:
+
 ```bash
 istioctl install -f istio-spire-config.yaml
 ```
 
 2. Configure SPIFFE ID registration:
+
 ```bash
 kubectl apply -f clusterspiffeid.yaml
 ```
 
 3. Enable SPIRE identity for Ingress Gateway:
+
 ```bash
 kubectl patch deployment istio-ingressgateway -n istio-system \
   -p '{"spec":{"template":{"metadata":{"labels":{"spiffe.io/spire-managed-identity": "true"}}}}}'
 ```
 
-### 6. SVID Secret Sync Controller
+### Monitor SDS Proxy Logs
 
-The SVID Secret Sync Controller syncs SPIRE-issued SVIDs to Kubernetes secrets for Istio gateway certificates.
-The controller:
-- Watches for SPIFFE X.509 SVIDs
-- Converts SVIDs to Kubernetes TLS secrets
-- Manages secret lifecycle
-- Supports multiple gateway certificates
-- Performs automatic cleanup
-
-1. Build and push the controller image:
 ```bash
-# REGISTRY=<registry>
-
-docker build -t $REGISTRY/svid-secret-sync:v0.1.8 .
-docker push $REGISTRY/svid-secret-sync:v0.1.8
+kubectl logs -l app=spiffe-csi-proxy -n spiffe-csi-proxy -c spiffe-csi-proxy -f
 ```
 
-2. Deploy the controller:
-```bash
-kubectl apply -f rbac.yaml
-kubectl apply -f deployment.yaml
-```
+### Check Istio Secret Configuration
 
-## Testing
-
-### Verify SPIRE Registration
+View the secrets configured in Istio Ingress Gateway:
 
 ```bash
-kubectl exec -n spire $(kubectl get pod -n spire -l app=spire-server \
-  -o jsonpath='{.items[0].metadata.name}') \
-  -c spire-server -- /opt/spire/bin/spire-server entry show
+istioctl pc secret -n istio-system $(kubectl get pod -n istio-system -l app=istio-ingressgateway -o jsonpath='{.items[0].metadata.name}')
 ```
 
 ### Test TLS Certificates
 
+Get certificate information for a specific domain:
+
 ```bash
-INGRESS_HOST=$(kubectl -n istio-system get service istio-ingressgateway \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+INGRESS_HOST=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
 INGRESS_PORT=443
-
-# Test app1 certificate
-openssl s_client -connect $INGRESS_HOST:$INGRESS_PORT \
-  -servername app1.example.org -showcerts
-
-# Test app2 certificate
-openssl s_client -connect $INGRESS_HOST:$INGRESS_PORT \
-  -servername app2.example.org -showcerts
+echo | openssl s_client -connect $INGRESS_HOST:$INGRESS_PORT -servername app1.example.org -showcerts | openssl x509 -noout -text
 ```
 
-Example certificate:
-```
-Issuer: C=US, O=Example Organization, CN=example.org
-Subject: C=US, O=SPIRE, CN=app1.example.org
-X509v3 Subject Alternative Name:
-    DNS:app1.example.org
-    URI:spiffe://example.org/ns/istio-system/sa/app1
+### Inspect Individual Certificates
+
+View app1 certificate:
+
+```bash
+istioctl pc secret -n istio-system $(kubectl get pod -n istio-system -l app=istio-ingressgateway -o jsonpath='{.items[0].metadata.name}') -o json | jq -r '.dynamicActiveSecrets[1].secret.tlsCertificate.certificateChain.inlineBytes' | base64 -d | openssl x509 -text -noout
 ```
 
-## Components Version 
-- SPIRE Server: 1.5.4
-- SPIRE Agent: 1.5.4
-- SPIFFE CSI Driver: 0.2.0
-- SPIRE Controller Manager: 0.2.3
-- Istio: 1.14+ required
-- SVID Secret Sync: v0.1.8
-- PostgreSQL: 14.10
+View default certificate:
+
+```bash
+istioctl pc secret -n istio-system $(kubectl get pod -n istio-system -l app=istio-ingressgateway -o jsonpath='{.items[0].metadata.name}') -o json | jq -r '.dynamicActiveSecrets[0].secret.tlsCertificate.certificateChain.inlineBytes' | base64 -d | openssl x509 -text -noout
+```
+
+### Verify SPIRE Registration
+
+View registered SPIFFE IDs:
+
+```bash
+kubectl exec -n spire $(kubectl get pod -n spire -l app=spire-server -o jsonpath='{.items[0].metadata.name}') -c spire-server -- /opt/spire/bin/spire-server entry show
+```
+
+## Components
+
+- SPIRE Server and Agent
+- SPIFFE CSI Driver (SDS Proxy)
+- Istio with SPIFFE integration
+
+The SDS proxy operates as a CSI driver, mounting the SPIRE Workload API socket into Istio pods. It acts as an
+intermediary between SPIRE and Istio, handling certificate updates and conversion of SPIRE SVIDs into formats compatible
+with Istio's Secret Discovery Service (SDS).

@@ -11,26 +11,22 @@ spec:
 apiVersion: spire.spiffe.io/v1alpha1
 kind: ClusterSPIFFEID
 metadata:
-  name: ingress-app1
+  name: spiffe-csi-proxy
 spec:
-  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/app1"
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/spiffe-csi-proxy/sa/spiffe-csi-proxy"
   workloadSelectorTemplates:
-    - k8s:ns:istio-system
-    - k8s:sa:svid-secret-sync
-  dnsNameTemplates:
-    - app1.example.org
+    - k8s:ns:spiffe-csi-proxy
+    - k8s:sa:spiffe-csi-proxy
 ---
 apiVersion: spire.spiffe.io/v1alpha1
 kind: ClusterSPIFFEID
 metadata:
-  name: ingress-app2
+  name: ingressgw
 spec:
-  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/app2"
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/istio-ingressgateway"
   workloadSelectorTemplates:
-    - k8s:ns:istio-system
-    - k8s:sa:svid-secret-sync
-  dnsNameTemplates:
-    - app2.example.org
+    - k8s:ns:spiffe-csi-proxy
+    - k8s:sa:spiffe-csi-proxy
 ---
 apiVersion: spire.spiffe.io/v1alpha1
 kind: ClusterSPIFFEID
@@ -39,8 +35,8 @@ metadata:
 spec:
   spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/app1"
   workloadSelectorTemplates:
-    - k8s:ns:istio-system
-    - k8s:sa:ingress-svid-csi-driver
+    - k8s:ns:spiffe-csi-proxy
+    - k8s:sa:spiffe-csi-proxy
   dnsNameTemplates:
     - app1.example.org
 ---
@@ -51,7 +47,7 @@ metadata:
 spec:
   spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/istio-system/sa/app2"
   workloadSelectorTemplates:
-    - k8s:ns:istio-system
-    - k8s:sa:ingress-svid-csi-driver
+    - k8s:ns:spiffe-csi-proxy
+    - k8s:sa:spiffe-csi-proxy
   dnsNameTemplates:
     - app2.example.org

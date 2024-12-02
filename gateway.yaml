@@ -13,8 +13,8 @@ spec:
         protocol: HTTPS
       tls:
         mode: SIMPLE
-        serverCertificate: /etc/istio/ingressgateway-certs/app1/tls.crt
-        privateKey: /etc/istio/ingressgateway-certs/app1/tls.key
+        serverCertificate: /etc/istio/istio-system/app1/tls.crt
+        privateKey: /etc/istio/istio-system/app1/tls.key
       hosts:
         - "app1.example.org"
     - port:
@@ -23,8 +23,8 @@ spec:
         protocol: HTTPS
       tls:
         mode: SIMPLE
-        serverCertificate: /etc/istio/ingressgateway-certs/app2/tls.crt
-        privateKey: /etc/istio/ingressgateway-certs/app2/tls.key
+        serverCertificate: /etc/istio/istio-system/app2/tls.crt
+        privateKey: /etc/istio/istio-system/app2/tls.key
       hosts:
         - "app2.example.org"
 ---

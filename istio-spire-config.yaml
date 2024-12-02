@@ -8,6 +8,8 @@ spec:
     trustDomain: example.org
   values:
     global:
+      logging:
+        level: "default:debug"
     sidecarInjectorWebhook:
       templates:
         spire: |
@@ -15,13 +17,13 @@ spec:
             containers:
             - name: istio-proxy
               volumeMounts:
-              - name: credential-socket
-                mountPath: /run/secrets/credential-uds
+              - name: workload-socket
+                mountPath: /run/secrets/workload-spiffe-uds
                 readOnly: true
             volumes:
-              - name: credential-socket
+              - name: workload-socket
                 csi:
-                  driver: "csi.spiffe.io"
+                  driver: "csi.spiffe.proxy"
                   readOnly: true
     pilot:
       env:
@@ -42,37 +44,19 @@ spec:
         label:
           istio: ingressgateway
         k8s:
-          podAnnotations:
-            proxy.istio.io/config: |
-              {
-                "metadata": {
-                  "CREDENTIAL_NAME": "true"
-                }
-              }
           overlays:
             - apiVersion: apps/v1
               kind: Deployment
               name: istio-ingressgateway
               patches:
-                - path: spec.template.spec.volumes.[name:credential-socket]
+                - path: spec.template.spec.volumes.[name:workload-socket]
                   value:
-                    name: credential-socket
+                    name: workload-socket
                     csi:
-                      driver: "csi.spiffe.io"
+                      driver: "csi.spiffe.proxy"
                       readOnly: true
-                - path: spec.template.spec.containers.[name:istio-proxy].volumeMounts.[name:credential-socket]
+                - path: spec.template.spec.containers.[name:istio-proxy].volumeMounts.[name:workload-socket]
                   value:
-                    name: credential-socket
-                    mountPath: "/run/secrets/credential-uds"
-                    readOnly: true
-                - path: spec.template.spec.volumes.[name:ingressgateway-certs]
-                  value:
-                    name: ingressgateway-certs
-                    csi:
-                      driver: "ingress.csi.spiffe.io"
-                      readOnly: true
-                - path: spec.template.spec.containers.[name:istio-proxy].volumeMounts.[name:ingressgateway-certs]
-                  value:
-                    name: ingressgateway-certs
-                    mountPath: "/etc/istio/ingressgateway-certs"
+                    name: workload-socket
+                    mountPath: "/run/secrets/workload-spiffe-uds"
                     readOnly: true

@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spiffe-csi-proxy
+  namespace: spiffe-csi-proxy
+spec:
+  selector:
+    matchLabels:
+      app: spiffe-csi-proxy
+  template:
+    metadata:
+      labels:
+        app: spiffe-csi-proxy
+    spec:
+      serviceAccountName: spiffe-csi-proxy
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: spiffe-csi-proxy
+          image: docker.io/fengyu225/spiffe-csi-driver:0.1.0
+          imagePullPolicy: Always
+          args: [
+            "-workload-api-socket-dir", "/spiffe-workload-api",
+            "-csi-socket-path", "/csi-proxy/csi.sock",
+            "-proxy-socket-dir", "/spiffe-csi-proxy",
+            "-trust-domain", "example.org",
+            "-plugin-name", "csi.spiffe.proxy",
+            "-log-level", "debug",
+          ]
+          env:
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - mountPath: /spiffe-workload-api
+              name: workload-api
+              readOnly: true
+            - mountPath: /csi-proxy
+              name: csi-proxy-socket-dir
+            - mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+              name: kubelet-pods-dir
+            - mountPath: /spiffe-csi-proxy
+              name: proxy-socket-dir
+              mountPropagation: Bidirectional
+          securityContext:
+            privileged: true
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.4.0
+          args: [
+            "-csi-address", "/csi-proxy/csi.sock",
+            "-kubelet-registration-path", "/var/lib/kubelet/plugins/csi.spiffe.proxy/csi.sock",
+          ]
+          volumeMounts:
+            - mountPath: /csi-proxy
+              name: csi-proxy-socket-dir
+            - name: registration-dir
+              mountPath: /registration
+      volumes:
+        - name: workload-api
+          csi:
+            driver: "csi.spiffe.io"
+            readOnly: true
+        - name: csi-proxy-socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/csi.spiffe.proxy
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: kubelet-pods-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: proxy-socket-dir
+          emptyDir: { }

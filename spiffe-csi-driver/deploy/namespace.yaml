@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spiffe-csi-proxy
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spiffe-csi-proxy
+  namespace: spiffe-csi-proxy

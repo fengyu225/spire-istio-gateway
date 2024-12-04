@@ -34,6 +34,85 @@ eksctl create iamserviceaccount \
   --role-only \
   --attach-policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy \
   --approve
+
+# Create SPIRE Server IAM policies and role
+# Create SpireServerPolicy
+cat << EOF > spire-server-policy.json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "kms:Decrypt",
+                "kms:GenerateDataKey",
+                "kms:CreateGrant",
+                "kms:ListGrants",
+                "kms:RevokeGrant"
+            ],
+            "Resource": "arn:aws:kms:us-east-1:*:key/*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "acm-pca:IssueCertificate",
+                "acm-pca:GetCertificate",
+                "acm-pca:GetCertificateAuthorityCertificate"
+            ],
+            "Resource": "arn:aws:acm-pca:us-east-1:164314285563:certificate-authority/4cc5758d-ac26-41dd-b3c8-165cb2ffc80f"
+        }
+    ]
+}
+EOF
+
+# Get the OIDC provider ID from the cluster
+OIDC_ID=$(aws eks describe-cluster --name spire-demo --region us-east-1 \
+  --query "cluster.identity.oidc.issuer" --output text | cut -d'/' -f5)
+
+# Create trust policy with dynamic OIDC ID
+cat << EOF > trust-policy.json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Federated": "arn:aws:iam::164314285563:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/${OIDC_ID}"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+                "StringEquals": {
+                    "oidc.eks.us-east-1.amazonaws.com/id/${OIDC_ID}:sub": "system:serviceaccount:spire:spire-server",
+                    "oidc.eks.us-east-1.amazonaws.com/id/${OIDC_ID}:aud": "sts.amazonaws.com"
+                }
+            }
+        }
+    ]
+}
+EOF
+
+# Create the IAM policy
+aws iam create-policy \
+    --policy-name SpireServerPolicy \
+    --policy-document file://spire-server-policy.json
+
+# Create the IAM role or update IAM role with trust policy
+aws iam create-role \
+    --role-name SpireServerRole \
+    --assume-role-policy-document file://trust-policy.json
+    
+aws iam update-assume-role-policy \
+    --role-name SpireServerRole \
+    --policy-document file://trust-policy.json
+
+# Attach the policies to the role
+aws iam attach-role-policy \
+    --role-name SpireServerRole \
+    --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/SpireServerPolicy
+
+aws iam attach-role-policy \
+    --role-name SpireServerRole \
+    --policy-arn arn:aws:iam::164314285563:policy/SpirePCAPolicy
 ```
 
 ### 2. AWS RDS PostgreSQL Setup

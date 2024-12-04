@@ -48,7 +48,7 @@ data:
       KeyManager "aws_kms" {
         plugin_data {
           region = "us-east-1"
-          key_identifier_value = "46f0a119-d701-4a68-b860-14a672bb5c80"
+          key_identifier_value = "95c9b45e-995b-44c8-acde-931323d8b68b"
         }
       }
    

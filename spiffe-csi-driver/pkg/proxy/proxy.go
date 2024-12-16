@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -15,8 +16,10 @@ import (
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 	"net"
 	"os"
@@ -34,6 +37,7 @@ type WorkloadProxy struct {
 	client            *workloadapi.Client
 	trustDomain       string
 	log               logr.Logger
+	volumeContext     map[string]string
 }
 
 type sdsX509ContextWatcher struct {
@@ -62,17 +66,26 @@ func (w *sdsX509ContextWatcher) OnX509ContextWatchError(err error) {
 	w.log.Error(err, "Error watching X509 context")
 }
 
-func New(sourceSocket, destinationSocket, trustDomain string, log logr.Logger) (*WorkloadProxy, error) {
+func New(sourceSocket, destinationSocket, trustDomain string, volumeContext map[string]string, log logr.Logger) (*WorkloadProxy, error) {
 	return &WorkloadProxy{
 		sourceSocket:      sourceSocket,
 		destinationSocket: destinationSocket,
 		trustDomain:       trustDomain,
 		log:               log,
+		volumeContext:     volumeContext,
 	}, nil
 }
 
 func (p *WorkloadProxy) Start(ctx context.Context) error {
-	p.log.V(0).Info("Starting SDS proxy", "sourceSocket", p.sourceSocket, "destinationSocket", p.destinationSocket)
+	if err := p.validateVolumeContext(); err != nil {
+		p.log.Error(err, "Authorization failed for StreamSecrets")
+		return status.Error(codes.PermissionDenied, "unauthorized")
+	}
+
+	p.log.V(0).Info("Starting SDS proxy",
+		"sourceSocket", p.sourceSocket,
+		"destinationSocket", p.destinationSocket)
+
 	if err := os.Remove(p.sourceSocket); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove existing socket: %v", err)
 	}
@@ -95,6 +108,29 @@ func (p *WorkloadProxy) Start(ctx context.Context) error {
 
 	p.server = grpc.NewServer()
 	sdsCtx, cancel := context.WithCancel(context.Background())
+
+	// Extract and parse token data from context
+	var tokenInfo interface{}
+	if tokenData, ok := p.volumeContext["csi.storage.k8s.io/serviceAccount.tokens"]; ok {
+		var tokenResp map[string]struct {
+			Token               string `json:"token"`
+			ExpirationTimestamp string `json:"expirationTimestamp"`
+		}
+
+		if err := json.Unmarshal([]byte(tokenData), &tokenResp); err == nil {
+			audience := fmt.Sprintf("spiffe://%s", p.trustDomain)
+			p.log.V(0).Info("Successfully parsed token data",
+				"audience", audience,
+				"expiration", tokenResp[audience].ExpirationTimestamp)
+			tokenInfo = tokenResp
+		} else {
+			p.log.Error(err, "Failed to parse token data")
+			p.log.V(0).Info("Raw token data", "data", tokenData)
+		}
+	} else {
+		p.log.V(0).Info("No token data found in volume context")
+	}
+
 	sdsServer := &sdsServer{
 		client:       client,
 		trustDomain:  p.trustDomain,
@@ -104,6 +140,7 @@ func (p *WorkloadProxy) Start(ctx context.Context) error {
 		updates:      make(chan *workloadapi.X509Context, 1000),
 		watchCtx:     sdsCtx,
 		watchCancel:  cancel,
+		tokenInfo:    tokenInfo,
 	}
 	secretservice.RegisterSecretDiscoveryServiceServer(p.server, sdsServer)
 
@@ -144,6 +181,7 @@ type sdsServer struct {
 	updates      chan *workloadapi.X509Context
 	watchCtx     context.Context
 	watchCancel  context.CancelFunc
+	tokenInfo    interface{}
 }
 
 func (s *sdsServer) DeltaSecrets(secretservice.SecretDiscoveryService_DeltaSecretsServer) error {
@@ -285,12 +323,19 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 	// Get all SVIDs once for this request
 	svids, err := s.client.FetchX509SVIDs(ctx)
 	if err != nil {
+		if strings.Contains(err.Error(), "token expired") {
+			s.log.Error(err, "Token expired, waiting for refresh")
+			return nil, status.Error(codes.Unauthenticated, "token expired")
+		}
 		return nil, fmt.Errorf("failed to fetch SVIDs: %v", err)
 	}
 
 	// Debug log all available SVIDs
 	for _, svid := range svids {
-		s.log.V(-1).Info("Available SVID", "spiffeID", svid.ID.String(), "notBefore", svid.Certificates[0].NotBefore, "notAfter", svid.Certificates[0].NotAfter)
+		s.log.V(-1).Info("Available SVID",
+			"spiffeID", svid.ID.String(),
+			"notBefore", svid.Certificates[0].NotBefore,
+			"notAfter", svid.Certificates[0].NotAfter)
 	}
 
 	resources := make([]*anypb.Any, 0, len(req.ResourceNames))
@@ -321,7 +366,10 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 				continue
 			}
 			secret = s.createTLSSecret(name, targetSVID)
-			s.log.V(0).Info("Created default secret", "spiffeID", targetSVID.ID.String(), "notBefore", targetSVID.Certificates[0].NotBefore, "notAfter", targetSVID.Certificates[0].NotAfter)
+			s.log.V(0).Info("Created default secret",
+				"spiffeID", targetSVID.ID.String(),
+				"notBefore", targetSVID.Certificates[0].NotBefore,
+				"notAfter", targetSVID.Certificates[0].NotAfter)
 
 		case strings.HasPrefix(name, "file-cert:"):
 			spiffeID, err := s.convertFilePathToSpiffeID(name)

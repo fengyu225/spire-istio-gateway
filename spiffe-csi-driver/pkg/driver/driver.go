@@ -4,19 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/go-logr/logr"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"os"
 	"path/filepath"
 	"spiffe-csi-driver/internal/version"
 	"spiffe-csi-driver/pkg/logkeys"
 	"spiffe-csi-driver/pkg/mount"
+	"spiffe-csi-driver/pkg/proxy"
 	"sync"
 	"time"
-
-	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/go-logr/logr"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"spiffe-csi-driver/pkg/proxy"
 )
 
 type Config struct {
@@ -87,6 +86,11 @@ func (d *Driver) Probe(context.Context, *csi.ProbeRequest) (*csi.ProbeResponse, 
 	return &csi.ProbeResponse{}, nil
 }
 
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	ephemeralMode := req.GetVolumeContext()["csi.storage.k8s.io/ephemeral"]
 
@@ -95,10 +99,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		logkeys.TargetPath, req.TargetPath,
 	)
 
-	log.Info("NodePublishVolume called",
-		"volumeContext", req.VolumeContext,
-		"targetPath", req.TargetPath,
-		"volumeCapability", req.VolumeCapability)
+	log.Info("NodePublishVolume called", "targetPath", req.TargetPath, "volumeCapability", req.VolumeCapability)
 
 	// Validate request
 	switch {
@@ -127,10 +128,12 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	log.Info("Creating new proxy",
 		"sourceSocket", sourceSocket,
 		"destinationSocket", filepath.Join(d.workloadAPISocketDir, "socket"))
+
 	p, err := proxy.New(
 		sourceSocket,
 		filepath.Join(d.workloadAPISocketDir, "socket"),
 		d.trustDomain,
+		req.VolumeContext,
 		d.log,
 	)
 	if err != nil {
@@ -141,8 +144,11 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	d.proxies[req.VolumeId] = p
 	d.proxyMu.Unlock()
 
+	// Create a context with volume context for the proxy
+	proxyCtx := context.WithValue(d.proxyCtx, "volume_context", req.VolumeContext)
+
 	go func() {
-		if err := p.Start(d.proxyCtx); err != nil {
+		if err := p.Start(proxyCtx); err != nil {
 			log.Error(err, "proxy failed", "volume_id", req.VolumeId)
 		}
 		// Set socket permissions after proxy starts
@@ -197,11 +203,6 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 
 	log.Info("Volume published successfully")
 	return &csi.NodePublishVolumeResponse{}, nil
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {

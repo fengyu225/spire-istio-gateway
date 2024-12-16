@@ -12,7 +12,7 @@ data:
       data_dir = "/run/spire/server/data"
       log_level = "DEBUG"
       default_x509_svid_ttl = "24h"
-      ca_ttl = "168h"
+      ca_ttl = "48h"
       ca_subject = {
         country = ["US"]
         organization = ["Example Organization"]
@@ -31,7 +31,7 @@ data:
       DataStore "sql" {
         plugin_data {
           database_type = "postgres"
-          connection_string = "postgresql://spire_admin:not-a-secret@db-postgresql-sfo2-16385-do-user-10570456-0.i.db.ondigitalocean.com:25060/spiredb?sslmode=require"
+          connection_string = "postgresql://spire_admin:AVNS_5ZG_b_MaTCmqlZBDld_@db-postgresql-sfo2-16385-do-user-10570456-0.i.db.ondigitalocean.com:25060/spiredb?sslmode=require"
         }
       }    
 

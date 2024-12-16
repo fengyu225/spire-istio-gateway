@@ -8,3 +8,7 @@ spec:
   fsGroupPolicy: None
   volumeLifecycleModes:
     - Ephemeral
+  tokenRequests:
+    - audience: "spiffe://example.org"
+      expirationSeconds: 3600
+  requiresRepublish: true

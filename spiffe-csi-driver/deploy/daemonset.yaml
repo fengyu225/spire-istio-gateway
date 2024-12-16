@@ -17,7 +17,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: spiffe-csi-proxy
-          image: docker.io/fengyu225/spiffe-csi-driver:0.1.0
+          image: docker.io/fengyu225/spiffe-csi-driver:0.1.1
           imagePullPolicy: Always
           args: [
             "-workload-api-socket-dir", "/spiffe-workload-api",

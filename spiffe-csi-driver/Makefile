@@ -1,4 +1,4 @@
-VERSION ?= 0.1.0
+VERSION ?= 0.1.1
 REGISTRY ?= fengyu225
 IMAGE_NAME ?= spiffe-csi-driver
 IMAGE_TAG ?= $(VERSION)

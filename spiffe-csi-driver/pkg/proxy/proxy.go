@@ -38,6 +38,8 @@ type WorkloadProxy struct {
 	trustDomain       string
 	log               logr.Logger
 	volumeContext     map[string]string
+	mu                sync.RWMutex
+	shutdown          bool
 }
 
 type sdsX509ContextWatcher struct {
@@ -169,6 +171,45 @@ func (p *WorkloadProxy) Start(ctx context.Context) error {
 	}()
 
 	return p.server.Serve(listener)
+}
+
+func (p *WorkloadProxy) Stop() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// If already shutdown, return immediately
+	if p.shutdown {
+		return nil
+	}
+	p.shutdown = true
+
+	// Stop the gRPC server gracefully if it exists
+	if p.server != nil {
+		p.server.GracefulStop()
+	}
+
+	// Close workload API client if it exists
+	if p.client != nil {
+		p.client.Close()
+	}
+
+	// Close listener if it exists
+	if p.listener != nil {
+		if err := p.listener.Close(); err != nil {
+			p.log.Error(err, "Error closing listener")
+		}
+	}
+
+	// Clean up socket file
+	if err := os.Remove(p.sourceSocket); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove socket file: %w", err)
+	}
+
+	p.log.Info("Proxy stopped successfully",
+		"source", p.sourceSocket,
+		"destination", p.destinationSocket)
+
+	return nil
 }
 
 type sdsServer struct {

@@ -39,6 +39,7 @@ spec:
     - k8s:sa:spiffe-csi-proxy
   dnsNameTemplates:
     - app1.example.org
+  ttl: 2m
 ---
 apiVersion: spire.spiffe.io/v1alpha1
 kind: ClusterSPIFFEID

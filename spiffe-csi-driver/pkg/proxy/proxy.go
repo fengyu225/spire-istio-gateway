@@ -5,7 +5,6 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -13,6 +12,7 @@ import (
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	secretservice "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	"github.com/go-logr/logr"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 	"google.golang.org/grpc"
@@ -21,12 +21,17 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
+	"io"
 	"net"
 	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	SecretType = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret"
 )
 
 type WorkloadProxy struct {
@@ -40,6 +45,11 @@ type WorkloadProxy struct {
 	volumeContext     map[string]string
 	mu                sync.RWMutex
 	shutdown          bool
+}
+
+type RateLimit struct {
+	timestamps []time.Time
+	version    string
 }
 
 type sdsX509ContextWatcher struct {
@@ -79,10 +89,10 @@ func New(sourceSocket, destinationSocket, trustDomain string, volumeContext map[
 }
 
 func (p *WorkloadProxy) Start(ctx context.Context) error {
-	if err := p.validateVolumeContext(); err != nil {
-		p.log.Error(err, "Authorization failed for StreamSecrets")
-		return status.Error(codes.PermissionDenied, "unauthorized")
-	}
+	//if err := p.validateVolumeContext(); err != nil {
+	//	p.log.Error(err, "Authorization failed for StreamSecrets")
+	//	return status.Error(codes.PermissionDenied, "unauthorized")
+	//}
 
 	p.log.V(0).Info("Starting SDS proxy",
 		"sourceSocket", p.sourceSocket,
@@ -111,28 +121,6 @@ func (p *WorkloadProxy) Start(ctx context.Context) error {
 	p.server = grpc.NewServer()
 	sdsCtx, cancel := context.WithCancel(context.Background())
 
-	// Extract and parse token data from context
-	var tokenInfo interface{}
-	if tokenData, ok := p.volumeContext["csi.storage.k8s.io/serviceAccount.tokens"]; ok {
-		var tokenResp map[string]struct {
-			Token               string `json:"token"`
-			ExpirationTimestamp string `json:"expirationTimestamp"`
-		}
-
-		if err := json.Unmarshal([]byte(tokenData), &tokenResp); err == nil {
-			audience := fmt.Sprintf("spiffe://%s", p.trustDomain)
-			p.log.V(0).Info("Successfully parsed token data",
-				"audience", audience,
-				"expiration", tokenResp[audience].ExpirationTimestamp)
-			tokenInfo = tokenResp
-		} else {
-			p.log.Error(err, "Failed to parse token data")
-			p.log.V(0).Info("Raw token data", "data", tokenData)
-		}
-	} else {
-		p.log.V(0).Info("No token data found in volume context")
-	}
-
 	sdsServer := &sdsServer{
 		client:       client,
 		trustDomain:  p.trustDomain,
@@ -142,7 +130,7 @@ func (p *WorkloadProxy) Start(ctx context.Context) error {
 		updates:      make(chan *workloadapi.X509Context, 1000),
 		watchCtx:     sdsCtx,
 		watchCancel:  cancel,
-		tokenInfo:    tokenInfo,
+		rateLimiter:  make(map[string]*RateLimit),
 	}
 	secretservice.RegisterSecretDiscoveryServiceServer(p.server, sdsServer)
 
@@ -214,15 +202,23 @@ func (p *WorkloadProxy) Stop() error {
 
 type sdsServer struct {
 	secretservice.UnimplementedSecretDiscoveryServiceServer
-	client       *workloadapi.Client
-	trustDomain  string
-	log          logr.Logger
-	mu           sync.RWMutex
-	lastVersions map[string]string
-	updates      chan *workloadapi.X509Context
-	watchCtx     context.Context
-	watchCancel  context.CancelFunc
-	tokenInfo    interface{}
+	client           *workloadapi.Client
+	trustDomain      string
+	log              logr.Logger
+	mu               sync.RWMutex
+	lastVersions     map[string]string
+	updates          chan *workloadapi.X509Context
+	watchCtx         context.Context
+	watchCancel      context.CancelFunc
+	watchedResources map[string]*WatchedResource
+	rateLimiter      map[string]*RateLimit // resourceName -> RateLimit
+	rateMu           sync.RWMutex
+}
+
+type WatchedResource struct {
+	NonceSent  string
+	NonceAcked string
+	Resources  []string
 }
 
 func (s *sdsServer) DeltaSecrets(secretservice.SecretDiscoveryService_DeltaSecretsServer) error {
@@ -230,15 +226,14 @@ func (s *sdsServer) DeltaSecrets(secretservice.SecretDiscoveryService_DeltaSecre
 }
 
 func (s *sdsServer) StreamSecrets(stream secretservice.SecretDiscoveryService_StreamSecretsServer) error {
-	s.log.V(0).Info("Started StreamSecrets request")
-
 	ctx := stream.Context()
-	var lastVersion string
-	var currentResources []string
+	log := s.log.WithName("StreamSecrets")
+	log.Info("Starting new SDS stream")
 
 	reqCh := make(chan *discovery.DiscoveryRequest)
 	errCh := make(chan error)
 
+	// Track requests in separate goroutine
 	go func() {
 		for {
 			req, err := stream.Recv()
@@ -250,94 +245,102 @@ func (s *sdsServer) StreamSecrets(stream secretservice.SecretDiscoveryService_St
 		}
 	}()
 
+	// Track last sent versions per resource
+	versions := make(map[string]string)
+	// Track current subscribed resources
+	subscribed := make(map[string]struct{})
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 
-		case update := <-s.updates:
-			s.log.V(0).Info("Received update in StreamSecrets",
-				"numSVIDs", len(update.SVIDs),
-				"currentResources", len(currentResources))
-
-			if len(currentResources) == 0 {
-				s.log.V(-1).Info("No resources to update")
-				continue
+		case err := <-errCh:
+			if err == io.EOF || status.Code(err) == codes.Canceled {
+				log.Info("Stream closed normally")
+				return nil
 			}
-
-			var resourcesToUpdate []string
-			for _, svid := range update.SVIDs {
-				s.log.V(-1).Info("Processing SVID update",
-					"spiffeID", svid.ID,
-					"notBefore", svid.Certificates[0].NotBefore,
-					"notAfter", svid.Certificates[0].NotAfter)
-
-				for _, resource := range currentResources {
-					spiffeID, err := s.getSpiffeIDForResource(resource)
-					if err != nil {
-						s.log.Error(err, "Failed to get SPIFFE ID for resource", "resource", resource)
-						continue
-					}
-					if spiffeID == svid.ID.String() {
-						resourcesToUpdate = append(resourcesToUpdate, resource)
-						s.log.V(-1).Info("Resource needs update", "resource", resource, "spiffeID", spiffeID)
-					}
-				}
-			}
-
-			if len(resourcesToUpdate) == 0 {
-				s.log.V(-1).Info("No resources need updating")
-				continue
-			}
-
-			req := &discovery.DiscoveryRequest{
-				ResourceNames: resourcesToUpdate,
-			}
-
-			resp, err := s.FetchSecrets(ctx, req)
-			if err != nil {
-				s.log.Error(err, "Failed to fetch secrets after update")
-				continue
-			}
-
-			err = stream.Send(resp)
-			if err != nil {
-				s.log.Error(err, "Failed to send secrets")
-				return err
-			}
-			lastVersion = resp.VersionInfo
-			s.log.V(0).Info("Sent certificate update to Istio",
-				"version", lastVersion,
-				"numUpdatedResources", len(resourcesToUpdate),
-				"totalResources", len(currentResources))
+			log.Error(err, "Stream error")
+			return err
 
 		case req := <-reqCh:
-			s.log.V(0).Info("Received request from Istio",
-				"numResources", len(req.ResourceNames),
-				"version", req.VersionInfo)
-
-			currentResources = req.ResourceNames
-
-			resp, err := s.FetchSecrets(ctx, req)
-			if err != nil {
-				s.log.Error(err, "Failed to fetch secrets")
+			if len(req.ResourceNames) == 0 {
 				continue
 			}
 
-			s.log.V(-1).Info("Fetched secrets for Istio", "version", resp.VersionInfo, "numResources", len(resp.Resources))
-			if resp.VersionInfo != lastVersion {
-				s.log.V(0).Info("Sending initial certificates to Istio", "version", resp.VersionInfo, "numResources", len(resp.Resources))
+			// Handle each resource separately
+			for _, resourceName := range req.ResourceNames {
+				subscribed[resourceName] = struct{}{}
+
+				// Check if version matches last sent version
+				if lastVersion, exists := versions[resourceName]; exists {
+					if lastVersion == req.VersionInfo {
+						// Add 100ms latency for same version
+						time.Sleep(5 * time.Second)
+						log.V(1).Info("Added latency for same version",
+							"resource", resourceName,
+							"version", req.VersionInfo)
+					}
+				}
+
+				// Create single-resource request
+				singleReq := &discovery.DiscoveryRequest{
+					TypeUrl:       req.TypeUrl,
+					ResourceNames: []string{resourceName},
+					VersionInfo:   req.VersionInfo,
+				}
+
+				// Get fresh secrets for this resource
+				resp, err := s.FetchSecrets(ctx, singleReq)
+				if err != nil {
+					log.Error(err, "Failed to fetch secrets", "resource", resourceName)
+					continue
+				}
+
+				// Update tracked version
+				versions[resourceName] = resp.VersionInfo
+
+				// Send individual response
 				if err := stream.Send(resp); err != nil {
-					s.log.V(1).Error(err, "Failed to send initial certificates")
+					log.Error(err, "Failed to send response", "resource", resourceName)
 					return err
 				}
-				lastVersion = resp.VersionInfo
-				s.log.V(1).Info("Sent initial certificates", "version", lastVersion, "numResources", len(currentResources))
+
+				log.V(1).Info("Sent response",
+					"resource", resourceName,
+					"version", resp.VersionInfo)
 			}
 
-		case err := <-errCh:
-			s.log.Error(err, "Error receiving request")
-			return err
+		case update := <-s.updates:
+			// On SVID update, push new certs to all subscribed resources
+			log.V(1).Info("Received SVID update", "numSVIDs", len(update.SVIDs))
+
+			for resourceName := range subscribed {
+				// Build discovery request for single resource
+				req := &discovery.DiscoveryRequest{
+					TypeUrl:       SecretType,
+					ResourceNames: []string{resourceName},
+				}
+
+				// Fetch fresh secrets for this resource
+				resp, err := s.FetchSecrets(ctx, req)
+				if err != nil {
+					log.Error(err, "Failed to fetch secrets after SVID update",
+						"resource", resourceName)
+					continue
+				}
+
+				// Send individual response
+				if err := stream.Send(resp); err != nil {
+					log.Error(err, "Failed to send update")
+					return err
+				}
+
+				log.V(1).Info("Sent update after SVID change",
+					"resource", resourceName,
+					"version", resp.VersionInfo)
+			}
+
 		}
 	}
 }
@@ -363,11 +366,8 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 
 	// Get all SVIDs once for this request
 	svids, err := s.client.FetchX509SVIDs(ctx)
+	//s.log.V(0).Info("Fetched SVIDs", "SVIDs", svids)
 	if err != nil {
-		if strings.Contains(err.Error(), "token expired") {
-			s.log.Error(err, "Token expired, waiting for refresh")
-			return nil, status.Error(codes.Unauthenticated, "token expired")
-		}
 		return nil, fmt.Errorf("failed to fetch SVIDs: %v", err)
 	}
 
@@ -380,7 +380,8 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 	}
 
 	resources := make([]*anypb.Any, 0, len(req.ResourceNames))
-	allResourcesData := make(map[string][]byte)
+
+	versions := make(map[string]string)
 
 	for _, name := range req.ResourceNames {
 		var secret *tlsv3.Secret
@@ -388,10 +389,29 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 
 		switch {
 		case name == "ROOTCA":
-			if len(svids) == 0 {
-				return nil, fmt.Errorf("no SVIDs available for ROOTCA")
+			bundle, err := s.client.FetchX509Bundles(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch trust bundle: %v", err)
 			}
-			secret, err = s.createRootCASecret(svids[0].Certificates[1:])
+
+			// Get root certs from bundle
+			trustDomain, err := spiffeid.TrustDomainFromString(s.trustDomain)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse trust domain: %v", err)
+			}
+			x509Bundle, err := bundle.GetX509BundleForTrustDomain(trustDomain)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get trust bundle for trust domain: %v", err)
+			}
+			rootCerts := x509Bundle.X509Authorities()
+			if len(rootCerts) == 0 {
+				return nil, fmt.Errorf("no root certificates in trust bundle")
+			}
+
+			secret, err = s.createRootCASecret(rootCerts)
+			if err != nil {
+				return nil, err
+			}
 
 		case name == "default":
 			expectedID := fmt.Sprintf("spiffe://%s/ns/istio-system/sa/istio-ingressgateway", s.trustDomain)
@@ -456,36 +476,46 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 			}
 			resources = append(resources, any)
 
-			// Extract the data that makes this resource unique
+			// Compute version for this specific resource
 			resourceData := extractResourceData(secret)
-			allResourcesData[name] = resourceData
+			version := s.computeResourceVersion(name, resourceData)
+			versions[name] = version
 		}
+
 	}
 
-	version := computeVersion(allResourcesData)
-	s.log.V(0).Info("Computed version", "version", version, "numResources", len(resources))
+	combinedVersion := s.combineVersions(versions)
+	s.log.V(0).Info("Computed versions",
+		"resourceVersions", versions,
+		"combinedVersion", combinedVersion,
+		"numResources", len(resources))
 
 	return &discovery.DiscoveryResponse{
-		VersionInfo: version,
+		VersionInfo: combinedVersion,
 		Resources:   resources,
 		TypeUrl:     "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret",
-		Nonce:       fmt.Sprintf("nonce-%s", version),
+		Nonce:       fmt.Sprintf("nonce-%s", combinedVersion),
 	}, nil
 }
 
-func computeVersion(allResourcesData map[string][]byte) string {
+func (s *sdsServer) computeResourceVersion(name string, data []byte) string {
+	h := sha256.New()
+	h.Write([]byte(name))
+	h.Write(data)
+	return fmt.Sprintf("sha256-%.32x", h.Sum(nil))
+}
+
+func (s *sdsServer) combineVersions(versions map[string]string) string {
 	h := sha256.New()
 	var names []string
-	for name := range allResourcesData {
+	for name := range versions {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
 	for _, name := range names {
 		h.Write([]byte(name))
-		h.Write(allResourcesData[name])
-		// Add current timestamp to make version change periodically
-		// This forces Istio to refresh certificates before expiry
-		h.Write([]byte(fmt.Sprintf("%d", time.Now().Unix())))
+		h.Write([]byte(versions[name]))
 	}
 	return fmt.Sprintf("sha256-%.32x", h.Sum(nil))
 }

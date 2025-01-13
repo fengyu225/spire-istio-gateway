@@ -44,23 +44,25 @@ data:
           }
         }
       }
-
-      KeyManager "aws_kms" {
+    
+      UpstreamAuthority "vault" {
         plugin_data {
-          region = "us-east-1"
-          key_identifier_value = "95c9b45e-995b-44c8-acde-931323d8b68b"
-        }
-      }
-   
-      UpstreamAuthority "aws_pca" {
-        plugin_data {
-          region = "us-east-1"
-          certificate_authority_arn = "arn:aws:acm-pca:us-east-1:164314285563:certificate-authority/4cc5758d-ac26-41dd-b3c8-165cb2ffc80f"
-          signing_algorithm = "SHA256WITHRSA"
-          x509_ca_ttl = "48h"
+          # Use the docker container name that will be accessible from Kind
+          vault_addr = "https://vault:8200"
+          insecure_skip_verify = true
+          pki_mount_point = "pki_root"
+          ca_cert_path = "/spire/vault/ca.crt"
+          cert_auth {
+            cert_auth_mount_point = "cert"
+            client_cert_path = "/spire/vault/client.crt"
+            client_key_path = "/spire/vault/client.key"
+          }
         }
       }    
     
+      KeyManager "memory" {
+      }
+   
       Notifier "k8sbundle" {
         plugin_data {
           namespace = "spire"

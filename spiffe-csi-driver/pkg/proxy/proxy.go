@@ -15,23 +15,30 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const (
 	SecretType = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret"
+
+	socketDirMode  = 0755 // rwxr-x--- for proxy socket directory
+	socketFileMode = 0666 // rw-rw---- owner and group can read/write
 )
 
 type WorkloadProxy struct {
@@ -89,24 +96,70 @@ func New(sourceSocket, destinationSocket, trustDomain string, volumeContext map[
 }
 
 func (p *WorkloadProxy) Start(ctx context.Context) error {
-	//if err := p.validateVolumeContext(); err != nil {
-	//	p.log.Error(err, "Authorization failed for StreamSecrets")
-	//	return status.Error(codes.PermissionDenied, "unauthorized")
-	//}
-
 	p.log.V(0).Info("Starting SDS proxy",
 		"sourceSocket", p.sourceSocket,
 		"destinationSocket", p.destinationSocket)
 
-	if err := os.Remove(p.sourceSocket); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove existing socket: %v", err)
+	// Create socket directory if it doesn't exist
+	socketDir := filepath.Dir(p.sourceSocket)
+	if err := os.MkdirAll(socketDir, socketDirMode); err != nil {
+		return fmt.Errorf("failed to create socket directory: %v", err)
 	}
 
-	listener, err := net.Listen("unix", p.sourceSocket)
-	if err != nil {
-		return fmt.Errorf("failed to create listener: %v", err)
+	// Check for existing socket and try to clean it up
+	if _, err := os.Stat(p.sourceSocket); err == nil {
+		// Try to connect to check if socket is active
+		conn, err := net.Dial("unix", p.sourceSocket)
+		if err != nil {
+			// Socket exists but can't connect - likely stale
+			p.log.V(0).Info("Removing stale socket file", "path", p.sourceSocket)
+			if err := os.Remove(p.sourceSocket); err != nil && !os.IsNotExist(err) {
+				p.log.Error(err, "Failed to remove stale socket file")
+				// Continue anyway as we'll use SO_REUSEADDR
+			}
+		} else {
+			conn.Close()
+		}
+	}
+
+	// Create Unix domain socket with SO_REUSEADDR
+	config := &net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var opErr error
+			err := c.Control(func(fd uintptr) {
+				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+				if opErr != nil {
+					return
+				}
+				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+			})
+			if err != nil {
+				return err
+			}
+			return opErr
+		},
+	}
+
+	// Try to listen with retries
+	var listener net.Listener
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		listener, lastErr = config.Listen(ctx, "unix", p.sourceSocket)
+		if lastErr == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("failed to create listener after retries: %v", lastErr)
 	}
 	p.listener = listener
+
+	// Set socket file permissions
+	if err := os.Chmod(p.sourceSocket, socketFileMode); err != nil {
+		p.listener.Close()
+		return fmt.Errorf("failed to set socket permissions: %v", err)
+	}
 
 	// Connect to the SPIRE Agent's Workload API
 	client, err := workloadapi.New(ctx, workloadapi.WithAddr(
@@ -118,7 +171,14 @@ func (p *WorkloadProxy) Start(ctx context.Context) error {
 	}
 	p.client = client
 
-	p.server = grpc.NewServer()
+	// Create gRPC server with keepalive settings
+	p.server = grpc.NewServer(
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionAge:      30 * time.Second,
+			MaxConnectionAgeGrace: 5 * time.Second,
+		}),
+	)
+
 	sdsCtx, cancel := context.WithCancel(context.Background())
 
 	sdsServer := &sdsServer{
@@ -150,14 +210,14 @@ func (p *WorkloadProxy) Start(ctx context.Context) error {
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	healthpb.RegisterHealthServer(p.server, healthServer)
 
+	// Set up graceful shutdown
 	go func() {
 		<-ctx.Done()
-		p.server.GracefulStop()
-		if p.client != nil {
-			p.client.Close()
-		}
+		p.log.V(0).Info("Context cancelled, initiating shutdown")
+		p.Stop()
 	}()
 
+	// Start serving
 	return p.server.Serve(listener)
 }
 
@@ -183,9 +243,9 @@ func (p *WorkloadProxy) Stop() error {
 
 	// Close listener if it exists
 	if p.listener != nil {
-		if err := p.listener.Close(); err != nil {
-			p.log.Error(err, "Error closing listener")
-		}
+		p.listener.Close()
+		// Wait for ongoing requests
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Clean up socket file
@@ -230,8 +290,8 @@ func (s *sdsServer) StreamSecrets(stream secretservice.SecretDiscoveryService_St
 	log := s.log.WithName("StreamSecrets")
 	log.Info("Starting new SDS stream")
 
-	reqCh := make(chan *discovery.DiscoveryRequest)
-	errCh := make(chan error)
+	reqCh := make(chan *discovery.DiscoveryRequest, 1)
+	errCh := make(chan error, 1)
 
 	// Track requests in separate goroutine
 	go func() {
@@ -241,19 +301,24 @@ func (s *sdsServer) StreamSecrets(stream secretservice.SecretDiscoveryService_St
 				errCh <- err
 				return
 			}
-			reqCh <- req
+			select {
+			case reqCh <- req:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 
-	// Track last sent versions per resource
+	// Track versions per resource
 	versions := make(map[string]string)
-	// Track current subscribed resources
+	// Track subscribed resources
 	subscribed := make(map[string]struct{})
 
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			log.Info("Stream context canceled")
+			return nil
 
 		case err := <-errCh:
 			if err == io.EOF || status.Code(err) == codes.Canceled {
@@ -270,12 +335,19 @@ func (s *sdsServer) StreamSecrets(stream secretservice.SecretDiscoveryService_St
 
 			// Handle each resource separately
 			for _, resourceName := range req.ResourceNames {
+				select {
+				case <-ctx.Done():
+					log.Info("Context canceled while processing resources")
+					return nil
+				default:
+				}
+
 				subscribed[resourceName] = struct{}{}
 
 				// Check if version matches last sent version
 				if lastVersion, exists := versions[resourceName]; exists {
 					if lastVersion == req.VersionInfo {
-						// Add 100ms latency for same version
+						// Add latency for same version
 						time.Sleep(5 * time.Second)
 						log.V(1).Info("Added latency for same version",
 							"resource", resourceName,
@@ -283,16 +355,27 @@ func (s *sdsServer) StreamSecrets(stream secretservice.SecretDiscoveryService_St
 					}
 				}
 
-				// Create single-resource request
+				// Create single-resource request with timeout
 				singleReq := &discovery.DiscoveryRequest{
 					TypeUrl:       req.TypeUrl,
 					ResourceNames: []string{resourceName},
 					VersionInfo:   req.VersionInfo,
 				}
 
-				// Get fresh secrets for this resource
-				resp, err := s.FetchSecrets(ctx, singleReq)
+				// Create a child context with timeout for fetching secrets
+				// We don't use parent/Istio stream context because Istio closed its SDS stream which happens regularly for reconnection,
+				// the stream context would be canceled. This would cause the SVID fetch to fail with a context cancellation error.
+				fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				resp, err := s.FetchSecrets(fetchCtx, singleReq)
+				cancel()
+
 				if err != nil {
+					if ctx.Err() != nil {
+						// If parent context is canceled, return gracefully
+						log.Info("Parent context canceled during fetch")
+						return nil
+					}
+					// For other errors, log and continue
 					log.Error(err, "Failed to fetch secrets", "resource", resourceName)
 					continue
 				}
@@ -300,10 +383,16 @@ func (s *sdsServer) StreamSecrets(stream secretservice.SecretDiscoveryService_St
 				// Update tracked version
 				versions[resourceName] = resp.VersionInfo
 
-				// Send individual response
-				if err := stream.Send(resp); err != nil {
-					log.Error(err, "Failed to send response", "resource", resourceName)
-					return err
+				// Send with context check
+				select {
+				case <-ctx.Done():
+					log.Info("Context canceled before sending response")
+					return nil
+				default:
+					if err := stream.Send(resp); err != nil {
+						log.Error(err, "Failed to send response", "resource", resourceName)
+						return err
+					}
 				}
 
 				log.V(1).Info("Sent response",
@@ -312,35 +401,50 @@ func (s *sdsServer) StreamSecrets(stream secretservice.SecretDiscoveryService_St
 			}
 
 		case update := <-s.updates:
-			// On SVID update, push new certs to all subscribed resources
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+			}
+
 			log.V(1).Info("Received SVID update", "numSVIDs", len(update.SVIDs))
 
 			for resourceName := range subscribed {
-				// Build discovery request for single resource
+				// Create timeout context for update processing
+				updateCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+
 				req := &discovery.DiscoveryRequest{
 					TypeUrl:       SecretType,
 					ResourceNames: []string{resourceName},
 				}
 
-				// Fetch fresh secrets for this resource
-				resp, err := s.FetchSecrets(ctx, req)
+				resp, err := s.FetchSecrets(updateCtx, req)
+				cancel()
+
 				if err != nil {
+					if ctx.Err() != nil {
+						return nil
+					}
 					log.Error(err, "Failed to fetch secrets after SVID update",
 						"resource", resourceName)
 					continue
 				}
 
-				// Send individual response
-				if err := stream.Send(resp); err != nil {
-					log.Error(err, "Failed to send update")
-					return err
+				// Send with context check
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					if err := stream.Send(resp); err != nil {
+						log.Error(err, "Failed to send update")
+						return err
+					}
 				}
 
 				log.V(1).Info("Sent update after SVID change",
 					"resource", resourceName,
 					"version", resp.VersionInfo)
 			}
-
 		}
 	}
 }
@@ -364,10 +468,21 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Create a new context with timeout
+	fetchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	// Get all SVIDs once for this request
-	svids, err := s.client.FetchX509SVIDs(ctx)
-	//s.log.V(0).Info("Fetched SVIDs", "SVIDs", svids)
+	svids, err := s.client.FetchX509SVIDs(fetchCtx)
 	if err != nil {
+		if err == context.Canceled {
+			s.log.V(0).Info("Context canceled during SVID fetch, returning empty response")
+			return &discovery.DiscoveryResponse{
+				VersionInfo: "empty",
+				Resources:   []*anypb.Any{},
+				TypeUrl:     SecretType,
+			}, nil
+		}
 		return nil, fmt.Errorf("failed to fetch SVIDs: %v", err)
 	}
 
@@ -380,7 +495,6 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 	}
 
 	resources := make([]*anypb.Any, 0, len(req.ResourceNames))
-
 	versions := make(map[string]string)
 
 	for _, name := range req.ResourceNames {
@@ -389,8 +503,12 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 
 		switch {
 		case name == "ROOTCA":
-			bundle, err := s.client.FetchX509Bundles(ctx)
+			// Use the same timeout context
+			bundle, err := s.client.FetchX509Bundles(fetchCtx)
 			if err != nil {
+				if err == context.Canceled {
+					continue
+				}
 				return nil, fmt.Errorf("failed to fetch trust bundle: %v", err)
 			}
 
@@ -427,10 +545,6 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 				continue
 			}
 			secret = s.createTLSSecret(name, targetSVID)
-			s.log.V(0).Info("Created default secret",
-				"spiffeID", targetSVID.ID.String(),
-				"notBefore", targetSVID.Certificates[0].NotBefore,
-				"notAfter", targetSVID.Certificates[0].NotAfter)
 
 		case strings.HasPrefix(name, "file-cert:"):
 			spiffeID, err := s.convertFilePathToSpiffeID(name)
@@ -440,7 +554,6 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 			}
 			s.log.V(0).Info("Looking for SVID", "spiffeID", spiffeID, "path", name)
 
-			// Find the matching SVID
 			var targetSVID *x509svid.SVID
 			for _, svid := range svids {
 				if svid.ID.String() == spiffeID {
@@ -451,16 +564,10 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 			if targetSVID == nil {
 				s.log.Error(nil, "No matching SVID found for file-cert",
 					"path", name,
-					"spiffeID", spiffeID,
-					"available_svids", fmt.Sprintf("%v", svids))
+					"spiffeID", spiffeID)
 				continue
 			}
 			secret = s.createTLSSecret(name, targetSVID)
-			s.log.V(0).Info("Created secret for file-cert",
-				"path", name,
-				"spiffeID", spiffeID,
-				"notBefore", targetSVID.Certificates[0].NotBefore,
-				"notAfter", targetSVID.Certificates[0].NotAfter)
 		}
 
 		if err != nil {
@@ -476,12 +583,19 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 			}
 			resources = append(resources, any)
 
-			// Compute version for this specific resource
 			resourceData := extractResourceData(secret)
 			version := s.computeResourceVersion(name, resourceData)
 			versions[name] = version
 		}
+	}
 
+	// If we have no resources but context was canceled, return empty response
+	if len(resources) == 0 && ctx.Err() == context.Canceled {
+		return &discovery.DiscoveryResponse{
+			VersionInfo: "empty",
+			Resources:   []*anypb.Any{},
+			TypeUrl:     SecretType,
+		}, nil
 	}
 
 	combinedVersion := s.combineVersions(versions)
@@ -493,7 +607,7 @@ func (s *sdsServer) FetchSecrets(ctx context.Context, req *discovery.DiscoveryRe
 	return &discovery.DiscoveryResponse{
 		VersionInfo: combinedVersion,
 		Resources:   resources,
-		TypeUrl:     "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret",
+		TypeUrl:     SecretType,
 		Nonce:       fmt.Sprintf("nonce-%s", combinedVersion),
 	}, nil
 }

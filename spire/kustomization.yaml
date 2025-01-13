@@ -3,7 +3,6 @@ kind: Kustomization
 
 resources:
   - namespace.yaml
-  - csi-driver.yaml
   - crds/clusterfederatedtrustdomains.yaml
   - crds/clusterspiffeids.yaml
   - configmaps/controller-manager.yaml

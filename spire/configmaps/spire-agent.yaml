@@ -10,7 +10,7 @@ data:
       log_level = "DEBUG"
       server_address = "spire-server"
       server_port = "8081"
-      socket_path = "/run/secrets/credential-uds/socket"
+      socket_path = "/run/spire/sockets/socket"
       trust_bundle_path = "/run/spire/bundle/bundle.crt"
       trust_domain = "example.org"
     }
@@ -23,8 +23,7 @@ data:
       }
 
       KeyManager "memory" {
-        plugin_data {
-        }
+        plugin_data = {}
       }
 
       WorkloadAttestor "k8s" {
@@ -34,7 +33,6 @@ data:
       }
 
       WorkloadAttestor "unix" {
-        plugin_data {
-        }
+        plugin_data = {}
       }
     }

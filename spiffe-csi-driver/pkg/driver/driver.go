@@ -8,6 +8,7 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"net"
 	"os"
 	"path/filepath"
 	"spiffe-csi-driver/internal/version"
@@ -83,6 +84,12 @@ func New(config Config) (*Driver, error) {
 		proxyCancel:          cancel,
 	}
 
+	// Clean up any stale sockets before starting
+	if err := d.cleanupStaleSocketFiles(); err != nil {
+		d.log.Error(err, "Failed to cleanup stale sockets")
+		// Continue anyway
+	}
+
 	// Ensure proxy directory exists
 	if err := os.MkdirAll(config.ProxySocketDir, socketDirMode); err != nil {
 		return nil, fmt.Errorf("failed to create proxy directory: %w", err)
@@ -111,7 +118,7 @@ func (d *Driver) restoreExistingVolumes() error {
 	log := d.log.WithName("restore")
 	log.Info("Restoring existing volumes after restart")
 
-	// Find all existing proxy directories
+	// Read proxy directory contents
 	entries, err := os.ReadDir(d.proxySocketDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -125,47 +132,106 @@ func (d *Driver) restoreExistingVolumes() error {
 			continue
 		}
 		volumeID := entry.Name()
+		volumeLog := log.WithValues("volumeID", volumeID)
 
-		// Check if the volume is still mounted
-		targetPath := d.findMountPointForVolume(volumeID)
+		// Check pod volumes directory for this volume
+		targetPath := d.findTargetInPodVolumes(volumeID)
+
 		if targetPath == "" {
-			// Clean up abandoned proxy directory
-			log.Info("Removing abandoned proxy directory", "volumeID", volumeID)
+			volumeLog.Info("No target found for volume, cleaning up")
 			if err := os.RemoveAll(filepath.Join(d.proxySocketDir, volumeID)); err != nil {
-				log.Error(err, "Failed to remove abandoned proxy directory", "volumeID", volumeID)
+				volumeLog.Error(err, "Failed to remove proxy directory")
 			}
 			continue
 		}
 
-		log.Info("Restoring proxy for volume", "volumeID", volumeID, "targetPath", targetPath)
+		// Ensure the mount exists and is valid
+		mounted, err := mount.IsMountPoint(targetPath)
+		if err != nil || !mounted {
+			volumeLog.Info("Remounting volume", "targetPath", targetPath)
+			sourceDir := filepath.Join(d.proxySocketDir, volumeID)
+
+			// Unmount first if needed
+			if err := mount.Unmount(targetPath); err != nil && !strings.Contains(err.Error(), "not mounted") {
+				volumeLog.Error(err, "Failed to unmount target path")
+			}
+
+			// Remount
+			if err := mount.BindMountRW(sourceDir, targetPath); err != nil {
+				volumeLog.Error(err, "Failed to remount volume")
+				continue
+			}
+		}
 
 		if err := d.recreateProxy(volumeID, targetPath); err != nil {
-			log.Error(err, "Failed to restore proxy", "volumeID", volumeID)
+			volumeLog.Error(err, "Failed to restore proxy")
 			continue
 		}
+
+		volumeLog.Info("Successfully restored volume")
 	}
 
 	return nil
 }
 
-func (d *Driver) findMountPointForVolume(volumeID string) string {
-	mounts, err := os.ReadFile("/proc/mounts")
+func (d *Driver) findTargetInPodVolumes(volumeID string) string {
+	// Walk through kubelet pod volumes directory
+	podVolumesPath := "/var/lib/kubelet/pods"
+	var targetPath string
+
+	err := filepath.Walk(podVolumesPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip errors, continue walking
+		}
+
+		// Look for the volume directory
+		if info.IsDir() && strings.Contains(path, "workload-socket") {
+			// Check if this is our volume by reading vol_data.json
+			volDataPath := filepath.Join(path, "vol_data.json")
+			if data, err := os.ReadFile(volDataPath); err == nil {
+				if strings.Contains(string(data), volumeID) {
+					targetPath = filepath.Join(path, "mount")
+					return filepath.SkipAll
+				}
+			}
+		}
+		return nil
+	})
+
 	if err != nil {
-		return ""
+		d.log.Error(err, "Error walking pod volumes directory")
 	}
 
-	volumePath := filepath.Join(d.proxySocketDir, volumeID)
-	for _, line := range strings.Split(string(mounts), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && strings.Contains(fields[0], volumePath) {
-			return fields[1]
+	return targetPath
+}
+
+func (d *Driver) findMountPointForVolume(volumeID string) string {
+	// Try multiple times with delay
+	for i := 0; i < 3; i++ {
+		mounts, err := os.ReadFile("/proc/mounts")
+		if err != nil {
+			time.Sleep(1 * time.Second)
+			continue
 		}
+
+		volumePath := filepath.Join(d.proxySocketDir, volumeID)
+		d.log.V(0).Info("Checking volume path in /proc/mounts", "volumePath", volumePath)
+		for _, line := range strings.Split(string(mounts), "\n") {
+			fields := strings.Fields(line)
+			d.log.V(0).Info("Mount from /proc/mounts", "mount", line, "fields", fields)
+			if len(fields) >= 2 && strings.Contains(fields[0], volumePath) {
+				return fields[1]
+			}
+		}
+		time.Sleep(1 * time.Second)
 	}
 	return ""
 }
 
 func (d *Driver) recreateProxy(volumeID, targetPath string) error {
 	sourceSocket := filepath.Join(d.proxySocketDir, volumeID, "socket")
+
+	// Create new proxy instance
 	p, err := proxy.New(
 		sourceSocket,
 		filepath.Join(d.workloadAPISocketDir, "socket"),
@@ -177,18 +243,34 @@ func (d *Driver) recreateProxy(volumeID, targetPath string) error {
 		return err
 	}
 
+	// Stop any existing proxy for this volume
 	d.proxyMu.Lock()
+	if existingProxy, exists := d.proxies[volumeID]; exists {
+		existingProxy.Stop()
+	}
 	d.proxies[volumeID] = p
 	d.proxyMu.Unlock()
 
+	// Start the new proxy
 	proxyCtx := context.WithValue(d.proxyCtx, "volume_context", map[string]string{})
 	go func() {
 		if err := p.Start(proxyCtx); err != nil {
-			d.log.Error(err, "Restored proxy failed", "volumeID", volumeID)
+			d.log.Error(err, "Proxy failed", "volumeID", volumeID)
 		}
 	}()
 
-	return nil
+	// Wait for socket to be created
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sourceSocket); err == nil {
+			if err := os.Chmod(sourceSocket, socketFileMode); err == nil {
+				return nil
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return fmt.Errorf("timeout waiting for socket creation")
 }
 
 func (d *Driver) Probe(context.Context, *csi.ProbeRequest) (*csi.ProbeResponse, error) {
@@ -242,8 +324,8 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	case req.VolumeCapability == nil:
 		return nil, status.Error(codes.InvalidArgument, "volume capability is required")
-	case !req.Readonly:
-		return nil, status.Error(codes.InvalidArgument, "read-only mode is required")
+	//case !req.Readonly:
+	//	return nil, status.Error(codes.InvalidArgument, "read-only mode is required")
 	case ephemeralMode != "true":
 		return nil, status.Error(codes.InvalidArgument, "only ephemeral volumes are supported")
 	}
@@ -513,6 +595,37 @@ func (d *Driver) checkWorkloadAPIMount(volumePath string) error {
 
 	if _, err := os.ReadDir(volumePath); err != nil {
 		return fmt.Errorf("unable to list contents of volume path: %w", err)
+	}
+	return nil
+}
+
+func (d *Driver) cleanupStaleSocketFiles() error {
+	entries, err := os.ReadDir(d.proxySocketDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read proxy directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		socketPath := filepath.Join(d.proxySocketDir, entry.Name(), "socket")
+		if _, err := os.Stat(socketPath); err == nil {
+			// Try to connect to check if socket is stale
+			conn, err := net.Dial("unix", socketPath)
+			if err != nil {
+				// Socket exists but can't connect - likely stale
+				if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+					d.log.Error(err, "Failed to remove stale socket", "path", socketPath)
+				}
+			} else {
+				conn.Close()
+			}
+		}
 	}
 	return nil
 }

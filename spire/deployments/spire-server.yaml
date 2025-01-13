@@ -28,6 +28,9 @@ spec:
             - name: spire-config
               mountPath: /run/spire/server/config
               readOnly: true
+            - name: vault-certs
+              mountPath: /spire/vault
+              readOnly: true
             - name: spire-server-socket
               mountPath: /tmp/spire-server/private
               readOnly: false
@@ -61,6 +64,9 @@ spec:
         - name: spire-config
           configMap:
             name: spire-server
+        - name: vault-certs
+          secret:
+            secretName: vault-certs
         - name: spire-server-socket
           emptyDir: {}
         - name: spire-controller-manager-config

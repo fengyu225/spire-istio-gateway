@@ -20,7 +20,7 @@ spec:
           image: docker.io/fengyu225/spiffe-csi-driver:0.1.1
           imagePullPolicy: Always
           args: [
-            "-workload-api-socket-dir", "/spiffe-workload-api",
+            "-workload-api-socket-dir", "/spire-agent-socket",
             "-csi-socket-path", "/csi-proxy/csi.sock",
             "-proxy-socket-dir", "/spiffe-csi-proxy",
             "-trust-domain", "example.org",
@@ -33,8 +33,8 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           volumeMounts:
-            - mountPath: /spiffe-workload-api
-              name: workload-api
+            - mountPath: /spire-agent-socket
+              name: spire-agent-socket-dir
               readOnly: true
             - mountPath: /csi-proxy
               name: csi-proxy-socket-dir
@@ -58,10 +58,10 @@ spec:
             - name: registration-dir
               mountPath: /registration
       volumes:
-        - name: workload-api
-          csi:
-            driver: "csi.spiffe.io"
-            readOnly: true
+        - name: spire-agent-socket-dir
+          hostPath:
+            path: /run/spire/agent-sockets
+            type: DirectoryOrCreate
         - name: csi-proxy-socket-dir
           hostPath:
             path: /var/lib/kubelet/plugins/csi.spiffe.proxy
@@ -75,4 +75,6 @@ spec:
             path: /var/lib/kubelet/pods
             type: Directory
         - name: proxy-socket-dir
-          emptyDir: { }
+          hostPath:
+            path: /run/spiffe-csi-proxy/proxy
+            type: DirectoryOrCreate

@@ -1,0 +1,26 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: server-spiffeid
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/workload/server"
+  podSelector:
+    matchLabels:
+      app: server
+      spiffe.io/spire-managed-identity: "true"
+  dnsNameTemplates:
+    - server-service
+    - server-service.spiffe-demo
+    - server-service.spiffe-demo.svc
+    - server-service.spiffe-demo.svc.cluster.local
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: client-spiffeid
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/workload/client"
+  podSelector:
+    matchLabels:
+      app: client
+      spiffe.io/spire-managed-identity: "true"

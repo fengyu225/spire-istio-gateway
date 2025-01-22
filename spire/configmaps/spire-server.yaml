@@ -45,20 +45,20 @@ data:
         }
       }
     
-      UpstreamAuthority "vault" {
-        plugin_data {
-          # Use the docker container name that will be accessible from Kind
-          vault_addr = "https://vault:8200"
-          insecure_skip_verify = true
-          pki_mount_point = "pki_root"
-          ca_cert_path = "/spire/vault/ca.crt"
-          cert_auth {
-            cert_auth_mount_point = "cert"
-            client_cert_path = "/spire/vault/client.crt"
-            client_key_path = "/spire/vault/client.key"
-          }
-        }
-      }    
+      # UpstreamAuthority "vault" {
+      #   plugin_data {
+      #     # Use the docker container name that will be accessible from Kind
+      #     vault_addr = "https://vault:8200"
+      #     insecure_skip_verify = true
+      #     pki_mount_point = "pki_root"
+      #     ca_cert_path = "/spire/vault/ca.crt"
+      #     cert_auth {
+      #       cert_auth_mount_point = "cert"
+      #       client_cert_path = "/spire/vault/client.crt"
+      #       client_key_path = "/spire/vault/client.key"
+      #     }
+      #   }
+      # }    
     
       KeyManager "memory" {
       }

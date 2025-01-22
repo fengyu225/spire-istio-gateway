@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server
+  namespace: spiffe-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: server
+  template:
+    metadata:
+      labels:
+        app: server
+        spiffe.io/spire-managed-identity: "true"
+    spec:
+      serviceAccountName: server-sa
+      containers:
+        - name: server
+          image: fengyu225/spiffe-demo-server:v0.0.1
+          imagePullPolicy: Always
+          args:
+            - --port=8443
+            - --cert-dir=/run/spiffe/certs
+          ports:
+            - containerPort: 8443
+          volumeMounts:
+            - name: spiffe-certs
+              mountPath: /run/spiffe/certs
+        - name: spiffe-helper
+          image: docker.io/fengyu225/spiffe-helper:v0.0.1
+          imagePullPolicy: Always
+          args:
+            - -config
+            - /etc/spiffe-helper/helper.conf
+          volumeMounts:
+            - name: spiffe-helper-config
+              mountPath: /etc/spiffe-helper
+            - name: spire-agent-socket
+              mountPath: /run/spire/agent-sockets
+              readOnly: true
+            - name: spiffe-certs
+              mountPath: /run/spiffe/certs
+      volumes:
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/agent-sockets
+            type: Directory
+        - name: spiffe-helper-config
+          configMap:
+            name: server-spiffe-helper-config
+        - name: spiffe-certs
+          emptyDir: {}

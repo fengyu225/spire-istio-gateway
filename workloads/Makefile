@@ -4,8 +4,24 @@ SERVER_NAME ?= spiffe-demo-server
 CLIENT_NAME ?= spiffe-demo-client
 IMAGE_TAG ?= $(VERSION)
 
+.PHONY: init
+init:
+	@echo "Initializing Go modules..."
+	@if [ ! -f certificate/go.mod ]; then \
+		cd certificate && go mod init certificate; \
+	fi
+	cd certificate && go get github.com/fsnotify/fsnotify && go mod tidy
+	@if [ ! -f server/go.mod ]; then \
+		cd server && go mod init server; \
+	fi
+	cd server && go mod edit -replace certificate=../certificate && go mod tidy
+	@if [ ! -f client/go.mod ]; then \
+		cd client && go mod init client; \
+	fi
+	cd client && go mod edit -replace certificate=../certificate && go mod tidy
+
 .PHONY: build
-build: build-server build-client
+build: init build-server build-client
 
 .PHONY: build-server
 build-server:
@@ -41,3 +57,8 @@ docker-push-client:
 clean:
 	rm -f server/bin/server
 	rm -f client/bin/client
+
+.PHONY: clean-deps
+clean-deps:
+	rm -f */go.sum
+	rm -f */go.mod

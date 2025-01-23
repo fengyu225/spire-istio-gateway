@@ -13,6 +13,7 @@ spec:
     - server-service.spiffe-demo
     - server-service.spiffe-demo.svc
     - server-service.spiffe-demo.svc.cluster.local
+  ttl: 10s
 ---
 apiVersion: spire.spiffe.io/v1alpha1
 kind: ClusterSPIFFEID
@@ -24,3 +25,4 @@ spec:
     matchLabels:
       app: client
       spiffe.io/spire-managed-identity: "true"
+  ttl: 60s

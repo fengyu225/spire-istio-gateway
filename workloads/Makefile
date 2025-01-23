@@ -1,4 +1,4 @@
-VERSION ?= v0.0.1
+VERSION ?= v0.0.2
 REGISTRY ?= fengyu225
 SERVER_NAME ?= spiffe-demo-server
 CLIENT_NAME ?= spiffe-demo-client
@@ -20,11 +20,11 @@ docker-build: docker-build-server docker-build-client
 
 .PHONY: docker-build-server
 docker-build-server:
-	docker build --platform linux/amd64 -t $(REGISTRY)/$(SERVER_NAME):$(IMAGE_TAG) server
+	docker build --platform linux/amd64 -t $(REGISTRY)/$(SERVER_NAME):$(IMAGE_TAG) -f server/Dockerfile .
 
 .PHONY: docker-build-client
 docker-build-client:
-	docker build --platform linux/amd64 -t $(REGISTRY)/$(CLIENT_NAME):$(IMAGE_TAG) client
+	docker build --platform linux/amd64 -t $(REGISTRY)/$(CLIENT_NAME):$(IMAGE_TAG) -f client/Dockerfile .
 
 .PHONY: docker-push
 docker-push: docker-push-server docker-push-client

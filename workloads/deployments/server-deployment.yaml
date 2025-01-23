@@ -17,11 +17,13 @@ spec:
       serviceAccountName: server-sa
       containers:
         - name: server
-          image: fengyu225/spiffe-demo-server:v0.0.1
+          image: fengyu225/spiffe-demo-server:v0.0.2
           imagePullPolicy: Always
           args:
-            - --port=8443
-            - --cert-dir=/run/spiffe/certs
+            - -addr
+            - ":8443"
+            - -cert-dir
+            - "/run/spiffe/certs"
           ports:
             - containerPort: 8443
           volumeMounts:

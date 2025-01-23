@@ -17,14 +17,14 @@ spec:
       serviceAccountName: client-sa
       containers:
         - name: client
-          image: fengyu225/spiffe-demo-client:v0.0.1
+          image: fengyu225/spiffe-demo-client:v0.0.2
           imagePullPolicy: Always
-          command:
-            - sleep
-            - infinity
-#          args:
-#            - --server-url=https://server-service:8443
-#            - --cert-dir=/run/spiffe/certs
+#          command:
+#            - sleep
+#            - infinity
+          args:
+            - --server-url=https://server-service:8443
+            - --cert-dir=/run/spiffe/certs
           volumeMounts:
             - name: spiffe-certs
               mountPath: /run/spiffe/certs

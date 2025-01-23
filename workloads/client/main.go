@@ -1,57 +1,141 @@
 package main
 
 import (
+	"certificate"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
 )
 
-func main() {
-	serverURL := flag.String("server-url", "", "Server URL")
-	certDir := flag.String("cert-dir", "", "Directory containing TLS certificates")
-	flag.Parse()
+type Client struct {
+	sync.RWMutex
+	transport *http.Transport
+	client    *http.Client
+}
 
-	// Load client certificates
-	cert, err := tls.LoadX509KeyPair(
-		fmt.Sprintf("%s/svid.pem", *certDir),
-		fmt.Sprintf("%s/svid_key.pem", *certDir),
-	)
-	if err != nil {
-		log.Fatalf("Failed to load certificates: %v", err)
-	}
-
-	// Load CA bundle
-	bundle, err := ioutil.ReadFile(fmt.Sprintf("%s/svid_bundle.pem", *certDir))
-	if err != nil {
-		log.Fatalf("Failed to load CA bundle: %v", err)
-	}
-
-	bundlePool := x509.NewCertPool()
-	bundlePool.AppendCertsFromPEM(bundle)
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				Certificates: []tls.Certificate{cert},
-				RootCAs:      bundlePool,
-			},
+func newClient() *Client {
+	return &Client{
+		client: &http.Client{
+			Timeout: 10 * time.Second,
 		},
 	}
+}
 
-	resp, err := client.Get(*serverURL)
-	if err != nil {
-		log.Fatalf("Failed to make request: %v", err)
+func formatName(name pkix.Name) string {
+	var parts []string
+	if name.CommonName != "" {
+		parts = append(parts, fmt.Sprintf("CN=%s", name.CommonName))
 	}
-	defer resp.Body.Close()
+	for _, org := range name.Organization {
+		parts = append(parts, fmt.Sprintf("O=%s", org))
+	}
+	for _, orgUnit := range name.OrganizationalUnit {
+		parts = append(parts, fmt.Sprintf("OU=%s", orgUnit))
+	}
+	for _, country := range name.Country {
+		parts = append(parts, fmt.Sprintf("C=%s", country))
+	}
+	for _, locality := range name.Locality {
+		parts = append(parts, fmt.Sprintf("L=%s", locality))
+	}
+	for _, province := range name.Province {
+		parts = append(parts, fmt.Sprintf("ST=%s", province))
+	}
+	return strings.Join(parts, ", ")
+}
 
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatalf("Failed to read response: %v", err)
+func logCertificateInfo(cert *x509.Certificate) {
+	log.Printf("Certificate Information:")
+	log.Printf("  Subject: %s", formatName(cert.Subject))
+	log.Printf("  Not Before: %s", cert.NotBefore.Format(time.RFC3339))
+	log.Printf("  Not After: %s", cert.NotAfter.Format(time.RFC3339))
+	log.Printf("  Time until expiration: %s", time.Until(cert.NotAfter).Round(time.Second))
+}
+
+func (c *Client) updateTransport(cert *tls.Certificate, pool *x509.CertPool) {
+	c.Lock()
+	defer c.Unlock()
+
+	c.transport = &http.Transport{
+		TLSClientConfig: &tls.Config{
+			Certificates: []tls.Certificate{*cert},
+			RootCAs:      pool,
+			MinVersion:   tls.VersionTLS12,
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				if len(verifiedChains) > 0 && len(verifiedChains[0]) > 0 {
+					logCertificateInfo(verifiedChains[0][0])
+				}
+				return nil
+			},
+		},
+		ForceAttemptHTTP2:     true,
+		DisableKeepAlives:     true, // Disable keep-alives
+		MaxIdleConns:          -1,   // Disable connection pooling
+		IdleConnTimeout:       1 * time.Millisecond,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	log.Printf("Server response: %s", string(body))
+	c.client.Transport = c.transport
+}
+
+func main() {
+	serverURL := flag.String("server-url", "https://localhost:8443", "Server URL")
+	certDir := flag.String("cert-dir", "./certs", "Directory containing certificates")
+	flag.Parse()
+
+	client := newClient()
+
+	certManager, err := certificate.NewCertManager(*certDir, client.updateTransport)
+	if err != nil {
+		log.Fatalf("Failed to initialize certificate manager: %v", err)
+	}
+	defer certManager.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go certManager.Start(ctx)
+
+	time.Sleep(1 * time.Second)
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	requestCount := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			requestCount++
+			log.Printf("\nMaking request #%d", requestCount)
+
+			func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				req, err := http.NewRequestWithContext(ctx, "GET", *serverURL, nil)
+				if err != nil {
+					log.Printf("Failed to create request: %v", err)
+					return
+				}
+				req.Close = true
+				resp, err := client.client.Do(req)
+				if err != nil {
+					log.Printf("Request failed: %v", err)
+					return
+				}
+				defer resp.Body.Close()
+			}()
+		}
+	}
 }

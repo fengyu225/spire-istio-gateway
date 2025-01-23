@@ -1,50 +1,121 @@
 package main
 
 import (
+	"certificate"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 )
 
-func main() {
-	port := flag.String("port", "8443", "Server port")
-	certDir := flag.String("cert-dir", "", "Directory containing TLS certificates")
-	flag.Parse()
+type Server struct {
+	sync.RWMutex
+	server      *http.Server
+	certManager *certificate.CertManager
+}
 
-	// Load certificates
-	cert, err := tls.LoadX509KeyPair(
-		fmt.Sprintf("%s/svid.pem", *certDir),
-		fmt.Sprintf("%s/svid_key.pem", *certDir),
-	)
+func NewServer(addr string, certDir string) (*Server, error) {
+	srv := &Server{}
+
+	certManager, err := certificate.NewCertManager(certDir, srv.updateCertificates)
 	if err != nil {
-		log.Fatalf("Failed to load certificates: %v", err)
+		return nil, fmt.Errorf("failed to initialize certificate manager: %v", err)
 	}
 
-	// Load CA bundle
-	bundle, err := ioutil.ReadFile(fmt.Sprintf("%s/svid_bundle.pem", *certDir))
-	if err != nil {
-		log.Fatalf("Failed to load CA bundle: %v", err)
-	}
-
-	bundlePool := x509.NewCertPool()
-	bundlePool.AppendCertsFromPEM(bundle)
-
-	server := &http.Server{
-		Addr: fmt.Sprintf(":%s", *port),
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "Hello from secure server!")
-		}),
+	httpServer := &http.Server{
+		Addr: addr,
 		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			ClientCAs:    bundlePool,
-			ClientAuth:   tls.RequireAndVerifyClientCert,
+			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				cert := certManager.GetCertificate()
+				return cert, nil
+			},
+			MinVersion: tls.VersionTLS12,
 		},
 	}
 
-	log.Printf("Starting server on port %s", *port)
-	log.Fatal(server.ListenAndServeTLS("", ""))
+	srv.server = httpServer
+	srv.certManager = certManager
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRoot)
+	httpServer.Handler = mux
+
+	return srv, nil
+}
+
+func (s *Server) updateCertificates(cert *tls.Certificate, pool *x509.CertPool) {
+	log.Println("Server certificates updated")
+}
+
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Server running with TLS! Current time: %s\n", time.Now().Format(time.RFC3339))
+}
+
+func (s *Server) Start(ctx context.Context) error {
+	go s.certManager.Start(ctx)
+
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("Starting server on %s", s.server.Addr)
+		if err := s.server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			errCh <- fmt.Errorf("server error: %v", err)
+		}
+		close(errCh)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return s.Stop()
+	}
+}
+
+func (s *Server) Stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := s.server.Shutdown(ctx); err != nil {
+		return fmt.Errorf("server shutdown failed: %v", err)
+	}
+
+	if err := s.certManager.Close(); err != nil {
+		return fmt.Errorf("certificate manager close failed: %v", err)
+	}
+
+	return nil
+}
+
+func main() {
+	addr := flag.String("addr", ":8443", "Server address")
+	certDir := flag.String("cert-dir", "./certs", "Directory containing certificates")
+	flag.Parse()
+
+	server, err := NewServer(*addr, *certDir)
+	if err != nil {
+		log.Fatalf("Failed to create server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Printf("Received signal: %v", sig)
+		cancel()
+	}()
+
+	if err := server.Start(ctx); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
 }
